@@ -1,0 +1,45 @@
+[package]
+name = "bluearchive-plugin"
+version = "0.4.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/YuLinLoli/BlueArchiveAronaPlugin"
+description = "碧蓝档案功能插件：抽卡/活动/攻略/塔罗/名字记录/备份恢复等，插入 Arona-rs 框架运行"
+
+# 本包是独立仓库的根，不再被任何 workspace 收养
+[workspace]
+
+[lib]
+name = "bluearchive_plugin"
+path = "src/lib.rs"
+# cdylib 产出框架启动时扫描 plugins/ 装载的 bluearchive_plugin.dll；
+# rlib 那份只给 `cargo test` 用。宿主永远不链接本 crate——插件与框架之间
+# 只有运行期的 dll 这一层关系，框架的 Cargo.toml 里不会出现这里的名字。
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Arona 框架。开发期用相邻目录的 path 依赖，改框架立刻能编；
+# 要发给别人用时换成 git 标签依赖（框架仓库打完 v1.0.0 之类的 tag 之后）：
+#   arona = { git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.0.0", default-features = false }
+# gui 由宿主决定，插件这边一律不强制打开。
+arona = { path = "../Arona-rs/crates/arona", version = "1.0.0", default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json"] }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+once_cell = "1"
+log = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+fontdue = "0.8"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[dev-dependencies]
+# 只有 `#[cfg(test)]` 的联调用例需要一个假 OneBot 端点（走 WS 握手），
+# 不该跟着链进交付的 dll，所以放在 dev-dependencies 而不是 dependencies。
+tokio-tungstenite = "0.24"
