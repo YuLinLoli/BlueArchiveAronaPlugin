@@ -1,0 +1,16 @@
+# 入库内容一直是 LF，但此前没有约束行尾的文件，全靠各人的 core.autocrlf。
+# 结果是 rustfmt 写出来的文件与 Windows 编辑器写出来的混在一起，git 会当场警告。
+# 这里把口径钉死：入库 LF、签出也 LF，和框架仓库保持一致。
+* text=auto eol=lf
+
+# 显式写出常见类型，免得下次有人以为 .rs 需要 CRLF 又去加一条 eol=crlf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+
+# 随带资源（字体、图片）若哪天加进来，别被"修复"行尾
+*.dll binary
+*.png binary
+*.ttf binary
+*.otf binary
