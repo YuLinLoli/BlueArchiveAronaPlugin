@@ -14,16 +14,26 @@
 //! 完整规范见框架仓库的 `PLUGIN_DEVELOPMENT.md`。
 
 // 功能模块都是插件私有；对外只暴露 BluearchivePlugin 这一个入口。
+// 命令实现、命令表登记（dispatcher）与服务清单（api）平铺在三处，不再套一层目录。
 mod activity;
+mod api;
+mod commands;
 mod config;
 mod data;
 mod db;
+mod dispatcher;
 mod entity;
 mod gacha;
 mod image;
 mod runtime;
-mod standalone;
 mod util;
+
+#[cfg(test)]
+mod onebot_print_test;
+#[cfg(test)]
+mod ten_pull_test;
+#[cfg(test)]
+mod trainer_test;
 
 use arona::plugin::{AronaPlugin, PluginContext, PluginMeta, PluginRegistrar};
 use arona::runtime::config::Feature;
@@ -111,7 +121,7 @@ impl Default for BluearchivePlugin {
     }
 }
 
-/// 可被分群开关控制的功能清单（key 与 standalone::dispatcher::feature_for 对齐）。
+/// 可被分群开关控制的功能清单（key 与 dispatcher::feature_for 对齐）。
 const FEATURES: [Feature; 10] = [
     Feature {
         key: "gacha",
@@ -166,7 +176,7 @@ const FEATURES: [Feature; 10] = [
 ];
 
 /// 每日活动推送任务名（与 activity::notify::enable_daily_job 保持一致）
-const DAILY_NOTIFY_JOB: &str = "StandaloneActivityNotify";
+const DAILY_NOTIFY_JOB: &str = "ActivityNotify";
 
 /// 上一次生效的推送小时（-1 = 尚未初始化）：arona.yml 热重载后据此判断是否需要重建每日任务
 static LAST_NOTIFY_HOUR: AtomicI32 = AtomicI32::new(-1);
@@ -197,7 +207,7 @@ impl AronaPlugin for BluearchivePlugin {
 
     fn configure(&self, ctx: &PluginContext) -> Result<(), String> {
         // 把本插件的全部命令与兜底登记进框架的命令表（内部会注册全部服务）
-        standalone::dispatcher::register(ctx, ctx.onebot_config.clone());
+        dispatcher::register(ctx, ctx.onebot_config.clone());
         // 聊天记录的记账/保留期/清理已在框架侧（arona::runtime::chatlog），插件不再自己挂钩子
 
         // --test-notify：20 秒后完整跑一次每日推送，便于联调验证
@@ -232,8 +242,8 @@ impl AronaPlugin for BluearchivePlugin {
             data::kivo::init().await;
         });
         ctx.spawn_as("刷新图片", async move {
-            standalone::commands::activity::refresh_all_images().await;
-            standalone::commands::tarot::download_all_images().await;
+            commands::activity::refresh_all_images().await;
+            commands::tarot::download_all_images().await;
         });
 
         // 每日活动推送（含启动 20 秒后的预警初始化）+ 每天 0 点的本地资源图片刷新
@@ -242,7 +252,7 @@ impl AronaPlugin for BluearchivePlugin {
             config::notify().every_day_hour.clamp(0, 23),
             Ordering::SeqCst,
         );
-        standalone::commands::activity::enable_image_refresh_job();
+        commands::activity::enable_image_refresh_job();
         Ok(())
     }
 

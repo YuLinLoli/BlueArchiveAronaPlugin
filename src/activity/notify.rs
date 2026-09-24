@@ -32,7 +32,7 @@ pub fn enable_service(ctx: &arona::plugin::PluginContext) {
 pub fn enable_daily_job(hour: u32) {
     quartz::create_daily(
         hour,
-        "StandaloneActivityNotify",
+        "ActivityNotify",
         crate::PLUGIN_ID,
         Arc::new(|| {
             crate::in_scope("定时推送", async move {
@@ -41,10 +41,10 @@ pub fn enable_daily_job(hour: u32) {
         }),
     );
     // 启动后 20 秒执行一次初始化：只做预警调度，不推送日历
-    if !quartz::exists("StandaloneActivityNotifyInit") {
+    if !quartz::exists("ActivityNotifyInit") {
         quartz::create_delay(
             20,
-            "StandaloneActivityNotifyInit",
+            "ActivityNotifyInit",
             crate::PLUGIN_ID,
             Arc::new(|| {
                 crate::in_scope("预警调度", async move {
@@ -233,7 +233,7 @@ fn insert_alert(
     before_hours: i64,
 ) {
     let key = format!(
-        "StandaloneActivityNotifyOneHour-{}-{}-{before_hours}",
+        "ActivityNotifyOneHour-{}-{}-{before_hours}",
         locale.command_name(),
         expected_ms
     );
@@ -287,7 +287,7 @@ fn insert_image_refresh(expected_ms: i64, locale: ServerLocale) {
         crate::PLUGIN_ID,
         Arc::new(move || {
             crate::in_scope("刷新活动图", async move {
-                crate::standalone::commands::activity::refresh_image(locale).await;
+                crate::commands::activity::refresh_image(locale).await;
             });
         }),
     );
@@ -455,7 +455,7 @@ mod tests {
         // 否则 notify 段会被当成未知键丢弃
         config::register_sections(arona::framework::Framework::global());
         arona::runtime::config::set_bot_id(10000);
-        arona::config::standalone::init(write_test_config()).expect("测试配置应能加载");
+        arona::config::settings::init(write_test_config()).expect("测试配置应能加载");
         arona::config::plugin_config::init();
         let sender = Arc::new(CaptureSender::new());
         arona::runtime::services::set_message_sender(sender.clone());
@@ -571,7 +571,7 @@ mod tests {
         )
         .await;
         let key = format!(
-            "StandaloneActivityNotifyOneHour-{}-{}-{}",
+            "ActivityNotifyOneHour-{}-{}-{}",
             ServerLocale::JP.command_name(),
             far.end_time - NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS * 3_600_000,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS
@@ -628,13 +628,13 @@ mod tests {
         // 每日推送任务：注册在配置的小时，且下次触发为整点
         enable_daily_job(8);
         assert!(
-            arona::quartz::exists("StandaloneActivityNotify"),
+            arona::quartz::exists("ActivityNotify"),
             "每日推送任务未注册"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
         let info = arona::quartz::list()
             .into_iter()
-            .find(|task| task.name == "StandaloneActivityNotify")
+            .find(|task| task.name == "ActivityNotify")
             .expect("未找到每日推送任务");
         let next = info.next_fire_ms.expect("每日推送任务没有下次触发时间");
         let fire_at = chrono::DateTime::from_timestamp_millis(next)
@@ -645,8 +645,8 @@ mod tests {
         assert_eq!(fire_at.second(), 0);
         println!("[每日推送] 下次触发: {fire_at}");
 
-        arona::quartz::remove("StandaloneActivityNotify");
-        arona::quartz::remove("StandaloneActivityNotifyInit");
+        arona::quartz::remove("ActivityNotify");
+        arona::quartz::remove("ActivityNotifyInit");
     }
 
     /// 端到端：真正执行一次每日推送（联网拉 GameKee 活动 + 渲染日历图）
@@ -656,7 +656,7 @@ mod tests {
         let _serial = GLOBAL_RUNTIME_LOCK.lock().await;
         config::register_sections(arona::framework::Framework::global());
         arona::runtime::config::set_bot_id(10000);
-        arona::config::standalone::init(write_test_config()).expect("测试配置应能加载");
+        arona::config::settings::init(write_test_config()).expect("测试配置应能加载");
         let sender = Arc::new(CaptureSender::new());
         arona::runtime::services::set_message_sender(sender.clone());
 

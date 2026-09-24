@@ -30,7 +30,7 @@ impl MessageSender for CaptureSender {
 
 #[ignore = "端到端自检(需联网), 运行: cargo test ten_pull -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
-async fn ten_pull_outputs_image_into_standalone() {
+async fn ten_pull_outputs_image_into_plugin_dir() {
     // 运行期依赖：数据目录 / 数据库 / 机器人配置
     let image_root = crate::image_dir();
     arona::runtime::services::set_data_root(arona::runtime::paths::data_root());
@@ -45,7 +45,7 @@ async fn ten_pull_outputs_image_into_standalone() {
         send_image_as_file: false,
         connections: std::collections::BTreeMap::new(),
     };
-    crate::standalone::dispatcher::register_into_table(config);
+    crate::dispatcher::register_into_table(config);
     let dispatcher = Arc::new(arona::runtime::dispatcher::CommandDispatcher::new());
 
     let sender = Arc::new(CaptureSender {

@@ -72,13 +72,14 @@ dll 与宿主跑在同一个进程里，而 `arona` 是被静态链接进 dll �
 | 项 | 本仓库怎么对齐 |
 | --- | --- |
 | `arona` 版本 + 除 `gui`/`default` 外的 feature 集合 | 依赖写 `version = "1.0.0"`，且 `default-features = false`（不替宿主决定 GUI） |
-| rustc 版本（`rustc -vV` 的 release 行） | 与编出宿主的那台机器完全相同 |
+| rustc 版本（`rustc -vV` 的 release 行） | 钉在仓库根的 `rust-toolchain.toml`，`cargo build` 自动选中它；要和宿主对上就得和框架仓库那一行**逐字相同** |
 | 目标三元组 | `x86_64-pc-windows-msvc` |
 | profile | 宿主是 release，插件也必须 `--release` |
 | CRT 链接方式 | `.cargo/config.toml` 里已写 `-C target-feature=+crt-static`，与框架仓库一致 |
 
-一句话：**谁编的 `arona-rs.exe`，就用同一台机器、同一套工具链编这个 dll**。
-更细的规矩（含拒载日志对照表）写在框架仓库的 `PLUGIN_DEVELOPMENT.md`。
+一句话：**谁编的 `arona-rs.exe`，就用同一套工具链编这个 dll**。rustc 版本这一项不再靠自觉，
+两个仓库各持一份同版本的 `rust-toolchain.toml`；框架那边升版本，这里必须跟着改并重编，
+否则老 dll 会全部拒载。更细的规矩（含拒载日志对照表）写在框架仓库的 `PLUGIN_DEVELOPMENT.md`。
 
 ## 本地开发
 
@@ -88,7 +89,9 @@ cargo test                # 纯函数离线单测（走 rlib 那份，不需要�
 cargo clippy --all-targets
 ```
 
-`Cargo.toml` 里对框架用的是相邻目录的 path 依赖（`../Arona-rs/crates/arona`），改框架立刻能编。
+`Cargo.toml` 里对框架暂时用的是相邻目录的 path 依赖（`../Arona-rs/crates/arona`），改框架立刻能编。
+发布口径是 git 标签依赖（`tag = "v1.0.0"`）——本轮把框架的 `arona::config::standalone` 改名成了
+`arona::config::settings`，那个名字不在已推送的 `v1.0.0` 里，要等下一个标签发出来才切得回去。
 要把这个仓库发给别人用时，换成 git 标签依赖再提交 —— 注释里写着具体那一行。
 
 调试：把编出的 dll 拷进框架运行目录的 `plugins\bluearchive\`，在那个目录里跑

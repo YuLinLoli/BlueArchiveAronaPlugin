@@ -176,7 +176,7 @@ async fn render_gacha_probe() {
 #[tokio::test]
 async fn refresh_all_images_creates_local_files() {
     assert!(crate::image::text::available(), "本机未找到可用中文字体");
-    crate::standalone::commands::activity::refresh_all_images().await;
+    crate::commands::activity::refresh_all_images().await;
     let mut produced = 0;
     for server in ServerLocale::ALL {
         match crate::image::activity::cached_image(server) {

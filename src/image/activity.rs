@@ -4,7 +4,7 @@
 //! 右侧显示“今天/明天/后天 X点 开始/结束”的易读时间，底部标注数据来源。
 //! 字体不可用时渲染返回 Err，由命令层回退为文本日历。
 //! 产物为固定文件名 activity-<服务>.png, 属于「本地资源图片」: 由每日 0 点与活动到期后
-//! 5 分钟的定时任务刷新(见 standalone::commands::activity), /活动 命中本地图片时直接发送。
+//! 5 分钟的定时任务刷新(见 commands::activity), /活动 命中本地图片时直接发送。
 
 use crate::data::activity::type_level;
 use crate::entity::{Activity, ServerLocale};

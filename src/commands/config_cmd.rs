@@ -7,7 +7,7 @@
 //! 走 [`crate::config`] 的原样片段读写路径。
 
 use crate::config::NotifyConfig;
-use arona::config::standalone;
+use arona::config::settings;
 use arona::runtime::dispatcher::CommandContext;
 use arona::runtime::message::OutgoingMessage;
 use arona::runtime::value::{self, ConfigValue};
@@ -17,7 +17,7 @@ const USAGE: &str = "用法: /config 查看全部配置; /config <配置名> 查
 
 /// (点号键, 说明) —— 框架通用项
 fn generic_fields() -> Vec<(&'static str, &'static str)> {
-    standalone::FIELDS
+    settings::FIELDS
         .iter()
         .map(|f| (f.key, f.description))
         .collect()
@@ -69,8 +69,8 @@ fn notify_sub_key(key: &str) -> Option<&str> {
 }
 
 fn update_field(key: &str, raw_value: &str, show_value: bool) -> String {
-    if standalone::find_field_index(key).is_some() {
-        return standalone::update(key, raw_value, show_value);
+    if settings::find_field_index(key).is_some() {
+        return settings::update(key, raw_value, show_value);
     }
     if let Some(sub) = notify_sub_key(key) {
         let mut config = crate::config::notify();
@@ -133,9 +133,9 @@ fn mutate_list(context: &Arc<CommandContext>, arguments: &[String]) -> OutgoingM
         return OutgoingMessage::text(mutate_notify_black_groups(value, is_add, show_value));
     }
     OutgoingMessage::text(if is_add {
-        standalone::add_to_list(&key, value, show_value)
+        settings::add_to_list(&key, value, show_value)
     } else {
-        standalone::remove_from_list(&key, value, show_value)
+        settings::remove_from_list(&key, value, show_value)
     })
 }
 
@@ -168,7 +168,7 @@ fn mutate_notify_black_groups(value: i64, is_add: bool, show_value: bool) -> Str
 }
 
 fn view_all() -> OutgoingMessage {
-    let config = standalone::config();
+    let config = settings::config();
     let notify = crate::config::notify();
     let mut text = format!(
         "Arona 全部配置\n框架配置: {}\n插件配置: {}\n(修改保存后自动热重载)\n",
@@ -197,9 +197,9 @@ fn view_all() -> OutgoingMessage {
 }
 
 fn view_one(key: &str) -> OutgoingMessage {
-    if standalone::find_field_index(key).is_some() {
-        let config = standalone::config();
-        let description = standalone::FIELDS
+    if settings::find_field_index(key).is_some() {
+        let config = settings::config();
+        let description = settings::FIELDS
             .iter()
             .find(|f| f.key == key)
             .map(|f| f.description)

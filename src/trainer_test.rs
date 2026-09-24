@@ -43,7 +43,7 @@ fn setup() -> (
         send_image_as_file: false,
         connections: std::collections::BTreeMap::new(),
     };
-    crate::standalone::dispatcher::register_into_table(config);
+    crate::dispatcher::register_into_table(config);
     let dispatcher = Arc::new(arona::runtime::dispatcher::CommandDispatcher::new());
     let sender = Arc::new(CaptureSender {
         sent: Mutex::new(Vec::new()),
@@ -205,7 +205,7 @@ async fn trainer_cloud_image_and_numeric_reply() {
     println!("[模糊建议]\n{suggestion}");
 
     let reply_context = context(sender.clone(), "1");
-    let reply = crate::standalone::commands::trainer::resolve_numeric_reply(reply_context).await;
+    let reply = crate::commands::trainer::resolve_numeric_reply(reply_context).await;
     let reply = reply.expect("数字回复未命中待选建议");
     let files: Vec<String> = image_files(&reply);
     assert!(!files.is_empty(), "数字回复未返回图片");

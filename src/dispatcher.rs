@@ -1,7 +1,7 @@
-//! 独立模式命令登记（对应原版 standalone/StandaloneCommandDispatcher）
+//! 本插件的命令表登记（对应原版 standalone/StandaloneCommandDispatcher）
 
-use crate::standalone::api;
-use crate::standalone::commands::{self, emergency::EmergencyStop};
+use crate::api;
+use crate::commands::{self, emergency::EmergencyStop};
 use arona::config::onebot::{ConnectionConfig, ConnectionType, OneBotConfig};
 use arona::plugin::PluginContext;
 use arona::runtime::dispatcher::{
@@ -221,7 +221,7 @@ pub fn registrations(
 pub fn numeric_reply() -> Arc<dyn FallbackHandler> {
     fallback(|context| async move {
         if let Some(message) =
-            crate::standalone::commands::trainer::resolve_numeric_reply(context.clone()).await
+            crate::commands::trainer::resolve_numeric_reply(context.clone()).await
         {
             context.reply_with_quote(message).await;
         }

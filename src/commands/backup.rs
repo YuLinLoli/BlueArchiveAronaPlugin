@@ -62,7 +62,7 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
     arona::runtime::log::info(format!("开始恢复备份: {name}"));
     quartz::pause_all();
     db::close();
-    let arona_file = config::standalone::default_file();
+    let arona_file = config::settings::default_file();
     if let Err(err) = std::fs::copy(&restored_arona, &arona_file) {
         return fail_restore(format!("覆盖 arona.yml 失败: {err}"));
     }
@@ -88,7 +88,7 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
         }
         plugin_config::reload_all();
     }
-    let _ = config::standalone::init(arona_file);
+    let _ = config::settings::init(arona_file);
     let _ = db::start();
     quartz::resume_all();
     let notice = if restored_onebot.is_file() {
@@ -106,7 +106,7 @@ fn fail_restore(err: String) -> OutgoingMessage {
 }
 
 fn create_backup() -> OutgoingMessage {
-    let arona_file = config::standalone::default_file();
+    let arona_file = config::settings::default_file();
     if !arona_file.is_file() {
         return OutgoingMessage::text("arona.yml 不存在，无法备份");
     }

@@ -47,7 +47,6 @@ dependencies = [
 [[package]]
 name = "arona"
 version = "1.0.0"
-source = "git+https://github.com/YuLinLoli/Arona-rs?tag=v1.0.0#3a2b4b69fa3b9cfd9f232a06fb5ec44aafdc2389"
 dependencies = [
  "axum",
  "base64",

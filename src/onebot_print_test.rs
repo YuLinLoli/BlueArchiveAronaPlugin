@@ -11,7 +11,7 @@
 
 use arona::config::onebot::OneBotConfig;
 use arona::onebot::application::OneBotApplication;
-use arona::onebot::business::StandaloneBusinessHandler;
+use arona::onebot::business::BusinessHandler;
 use arona::onebot::connection::ConnectionRegistry;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -81,7 +81,7 @@ async fn group_message_is_logged_immediately_over_ws_forward() {
     }
     let registry = Arc::new(ConnectionRegistry::new());
     // 这条用例只关心「收到消息先打印」的时序，不需要任何命令
-    let business = Arc::new(StandaloneBusinessHandler::new(
+    let business = Arc::new(BusinessHandler::new(
         config.clone(),
         arona::framework::Framework::global_arc(),
         Arc::new(arona::runtime::dispatcher::CommandDispatcher::new()),
