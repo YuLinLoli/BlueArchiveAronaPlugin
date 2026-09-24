@@ -6,3 +6,7 @@
 # 只改这一边不改那边，产出的 dll 挂不上宿主。
 [toolchain]
 channel = "1.98.0"
+# 与框架仓库同名文件保持一致：只钉 channel，不写 components。
+# components 会让每一次 cargo 都先去补装组件，补装失败即整条命令报错，
+# 网络不畅时还会留下半装的工具链。rustfmt/clippy 请显式装一次：
+#   rustup component add rustfmt clippy
