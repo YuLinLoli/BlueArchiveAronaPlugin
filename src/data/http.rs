@@ -1,9 +1,12 @@
-//! 简单的 HTTP 请求封装（对应原版 NetworkUtil + Jsoup 请求头）
-//! 全部接口使用 async reqwest，调用方需处于 tokio 运行时中。
-
-use once_cell::sync::Lazy;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::time::Duration;
+//! 插件的出站 HTTP：只负责拼请求头，真正发请求的是框架
+//!
+//! 这里刻意不链接 reqwest。dll 会把 reqwest/hyper/tokio 静态链接成独立的一份，而运行时上下文
+//! 是 thread-local 的：框架能在自己 poll 的每个任务里替这一份补上上下文，却管不到 hyper 自己
+//! 派生的后台任务（补连接、空闲驱逐），那些任务一 `tokio::spawn` 就 panic，顺带把连接池的锁
+//! 变成 PoisonError，之后每个请求都跟着炸。`arona::runtime::http` 把请求递给宿主那份客户端，
+//! 池子、keepalive、超时全开也跑在宿主的常驻 runtime 上（详见框架的 PLUGIN_DEVELOPMENT.md §14.1）。
+//!
+//! 三个 `*_with` 之外的函数都只是这套请求头的组合器，调用方无需知道底下走的是谁。
 
 /// 浏览器 UA（对应原版 gameKeeHeaders 中的 user-agent）
 pub const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
@@ -14,41 +17,9 @@ const ACCEPT_LANGUAGE_VALUE: &str = "zh-CN,zh;q=0.9,zh-Hans;q=0.8,und;q=0.7,zh-H
 const JSON_ACCEPT: &str = "application/json, text/plain, */*";
 const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
 
-/// 全局共享客户端：超时给足 60 秒，**连接池关掉**（`pool_max_idle_per_host(0)`）。
-///
-/// 关池子不是性能考虑，是正确性考虑：hyper 在池化路径上会把自己的一些活儿
-/// `tokio::spawn` 成脱离本次调用的后台任务（后台补连接、空闲驱逐）。插件 dll 把
-/// tokio 静态链接成了独立的一份，而运行时上下文是 thread-local 的——框架能在自己投出
-/// 的每个任务里替这一份补上上下文，却管不到第三方库自己派生的任务，那些任务再调
-/// `tokio::spawn` 就 panic，顺带把连接池的锁变成 PoisonError，之后每个请求都跟着炸。
-/// 关掉池子后 hyper 走「直接连接」那条路，不再派生任务；每个请求多一次 TCP+TLS 握手，
-/// 对每天几十次的查询量无所谓。
-static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-});
-
-fn client() -> reqwest::Client {
-    CLIENT.clone()
-}
-
-/// 把 (名, 值) 列表转成 HeaderMap，非法字段名/值直接忽略
-fn build_headers(headers: &[(&str, String)]) -> HeaderMap {
-    let mut map = HeaderMap::new();
-    for (key, value) in headers {
-        if let (Ok(name), Ok(value)) = (key.parse::<HeaderName>(), HeaderValue::from_str(value)) {
-            map.insert(name, value);
-        }
-    }
-    map
-}
-
 /// GameKee 各 JSON 接口的完整浏览器请求头（对应原版 GameKeeUtil.gameKeeHeaders）。
 ///
-/// 注意：host/connection 由 HTTP 栈自动处理，accept-encoding 由 reqwest 自动协商并解压，
+/// 注意：host/connection 由 HTTP 栈自动处理，accept-encoding 由框架的客户端自动协商并解压，
 /// 手动设置会与自动解压冲突，因此这里不重复设置这两类字段。
 pub fn game_kee_headers(referer: &str) -> Vec<(&'static str, String)> {
     vec![
@@ -117,64 +88,12 @@ pub fn arona_backend_headers(uuid: &str, version: &str) -> Vec<(&'static str, St
 
 /// 带指定请求头的 GET，返回响应文本
 pub async fn get_with(url: &str, headers: &[(&str, String)]) -> Result<String, String> {
-    let response = client()
-        .get(url)
-        .headers(build_headers(headers))
-        .send()
-        .await
-        .map_err(|err| format!("请求失败 {url}: {err}"))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|err| format!("读取响应失败 {url}: {err}"))?;
-    if !status.is_success() {
-        return Err(format!("请求 {url} 返回 HTTP {status}"));
-    }
-    Ok(text)
+    arona::runtime::http::get(url, headers).await
 }
 
 /// 带指定请求头的 GET，返回原始字节
 pub async fn get_bytes_with(url: &str, headers: &[(&str, String)]) -> Result<Vec<u8>, String> {
-    let response = client()
-        .get(url)
-        .headers(build_headers(headers))
-        .send()
-        .await
-        .map_err(|err| format!("请求失败 {url}: {err}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|err| format!("读取响应失败 {url}: {err}"))?;
-    if !status.is_success() {
-        return Err(format!("请求 {url} 返回 HTTP {status}"));
-    }
-    Ok(bytes.to_vec())
-}
-
-/// 带指定请求头的表单 POST，返回响应文本
-pub async fn post_form_with(
-    url: &str,
-    headers: &[(&str, String)],
-    form: &[(&str, String)],
-) -> Result<String, String> {
-    let response = client()
-        .post(url)
-        .headers(build_headers(headers))
-        .form(form)
-        .send()
-        .await
-        .map_err(|err| format!("请求失败 {url}: {err}"))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|err| format!("读取响应失败 {url}: {err}"))?;
-    if !status.is_success() {
-        return Err(format!("请求 {url} 返回 HTTP {status}"));
-    }
-    Ok(text)
+    arona::runtime::http::get_bytes(url, headers).await
 }
 
 /// 通用浏览器 GET + referer + 少量额外头（kivo.wiki 等非 GameKee 接口使用）
@@ -200,20 +119,4 @@ pub async fn get_bytes(url: &str, referer: &str) -> Result<Vec<u8>, String> {
         ("referer", referer.to_string()),
     ];
     get_bytes_with(url, &headers).await
-}
-
-/// 通用表单 POST（保留给后续非 GameKee 接口使用）
-pub async fn post_form(url: &str, form: &[(&str, &str)]) -> Result<String, String> {
-    let headers: Vec<(&str, String)> = vec![
-        ("user-agent", USER_AGENT_VALUE.to_string()),
-        ("accept", JSON_ACCEPT.to_string()),
-        ("accept-language", "zh-CN,zh;q=0.9".to_string()),
-        ("referer", "https://www.gamekee.com/ba/".to_string()),
-        ("game-alias", "ba".to_string()),
-    ];
-    let form: Vec<(&str, String)> = form
-        .iter()
-        .map(|(key, value)| (*key, (*value).to_string()))
-        .collect();
-    post_form_with(url, &headers, &form).await
 }
