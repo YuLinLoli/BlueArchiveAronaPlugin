@@ -18,11 +18,11 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Arona 框架。开发期用相邻目录的 path 依赖，改框架立刻能编；
-# 要发给别人用时换成 git 标签依赖（框架仓库打完 v1.0.0 之类的 tag 之后）：
-#   arona = { git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.0.0", default-features = false }
-# gui 由宿主决定，插件这边一律不强制打开。
-arona = { path = "../Arona-rs/crates/arona", version = "1.0.0", default-features = false }
+# Arona 框架：按 git 标签依赖，与本仓库发布说明里写的宿主版本一一对应。
+# 只有在改框架本体、要立刻编译验证时才临时切回相邻目录的 path 依赖，改完切回来：
+#   arona = { path = "../Arona-rs/crates/arona", version = "1.0.0", default-features = false }
+# gui 由宿主决定，插件这边一律不强制打开（框架的 PLUGIN_DEVELOPMENT.md §16）。
+arona = { git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.0.0", default-features = false }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
