@@ -360,11 +360,8 @@ fn parse_server_pool_arg(keyword: &str) -> Option<GachaServer> {
 }
 
 fn image_segment(path: &Path) -> MessageSegment {
-    MessageSegment::Image {
-        url: None,
-        file: Some(path.display().to_string()),
-        data: None,
-    }
+    // 走框架的 Image 句柄而不是自己拼段：那段以后再加线索（比如 file_id）这里不会跟着崩
+    arona::bot::Image::from_file(path.display().to_string()).segment()
 }
 
 fn send_images(files: &[PathBuf], keyword: &str) -> OutgoingMessage {

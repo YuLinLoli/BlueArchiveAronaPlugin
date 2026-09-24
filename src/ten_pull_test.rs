@@ -63,6 +63,9 @@ async fn ten_pull_outputs_image_into_plugin_dir() {
         quoted: None,
         segments: Vec::new(),
         sender: sender.clone(),
+        // 上下文末尾那个实例字段是 dll 会按编译期偏移读的跨镜像布局，
+        // 这里挂一套隔离实例即可（用例只看 sender 记下来的消息）
+        framework: arona::framework::Framework::new(),
     });
 
     let handled = dispatcher.dispatch(context).await;

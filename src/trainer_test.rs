@@ -64,6 +64,9 @@ fn context(sender: Arc<CaptureSender>, text: &str) -> Arc<CommandContext> {
         quoted: None,
         segments: Vec::new(),
         sender,
+        // 上下文末尾那个实例字段是 dll 会按编译期偏移读的跨镜像布局，
+        // 测试里挂一套隔离实例即可（这些用例只用到 sender 那份记账）
+        framework: arona::framework::Framework::new(),
     })
 }
 
