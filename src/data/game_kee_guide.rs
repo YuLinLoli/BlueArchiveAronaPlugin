@@ -19,6 +19,8 @@ const SCHEDULE_MARKER: &str = "日程笔记再见";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuideServer {
     JP,
+    // 全大写是上游 API 与日志里的服务器名，改名等于改对外口径
+    #[allow(clippy::upper_case_acronyms)]
     GLOBAL,
     CN,
 }
@@ -54,7 +56,7 @@ pub async fn entry_tree() -> Result<Value, String> {
 }
 
 /// 在目录树节点数组里按名字找子节点
-fn find_child_by_name<'a>(node: &'a Value, predicate: impl Fn(&str) -> bool) -> Option<&'a Value> {
+fn find_child_by_name(node: &Value, predicate: impl Fn(&str) -> bool) -> Option<&Value> {
     node.get("child")?.as_array()?.iter().find(|child| {
         child
             .get("name")

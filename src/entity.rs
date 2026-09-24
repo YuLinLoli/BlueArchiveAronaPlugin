@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum ServerLocale {
     JP,
+    // 全大写是原版枚举名，也是日志/序列化里出现的服名，不改
+    #[allow(clippy::upper_case_acronyms)]
     GLOBAL,
     CN,
 }
@@ -37,6 +39,8 @@ impl ServerLocale {
         }
     }
 
+    // 对外能力：按命令别名或显示名反查服务器，与 resolve_server 的入口口径保持一致
+    #[allow(dead_code)]
     pub fn by_command_or_name(raw: &str) -> Option<ServerLocale> {
         Self::ALL
             .into_iter()
@@ -104,6 +108,8 @@ impl ActivityType {
 }
 
 /// 活动（对应原版 `Activity`）
+// server 是活动实体的固有维度（日历/预警按服区分），当前消费方按类型分桶后未再读它
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Activity {
     pub content: String,

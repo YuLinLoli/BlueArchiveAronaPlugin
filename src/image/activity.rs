@@ -195,7 +195,7 @@ fn draw_section_rows(img: &mut RgbaImage, y: f32, width: i32, label: &str, rows:
         PAD_X - 6,
         cursor as i32 + 4,
         8,
-        (section_h - 8) as i32,
+        section_h - 8,
         draw::rgb(90, 150, 255),
     );
     draw_line_left(img, label, cursor, section_h, SECTION_SIZE, INK);

@@ -22,14 +22,12 @@ pub async fn tarot(context: Arc<CommandContext>) -> Option<OutgoingMessage> {
     let group0 = context.group_id.unwrap_or(user_id);
     let today = time::today();
     let record = dao::get_tarot_record(user_id, group0);
-    if tarot_config::day_one() {
-        if let Some(record) = &record {
-            if record.day == today {
-                if let Some(card) = dao::find_tarot(record.tarot) {
-                    return Some(send_message(&context, &card, record.positive).await);
-                }
-            }
-        }
+    if tarot_config::day_one()
+        && let Some(record) = &record
+        && record.day == today
+        && let Some(card) = dao::find_tarot(record.tarot)
+    {
+        return Some(send_message(&context, &card, record.positive).await);
     }
     let tarot_number = crate::util::random_int(TAROT_COUNT);
     let Some(card) = dao::find_tarot(tarot_number) else {

@@ -8,6 +8,8 @@ use arona::runtime::config as runtime_config;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+// 保留：与 BACKEND_API_ADDRESS/CDN_ADDRESS 同属后端地址表的一份，接口文档与排障会引用
+#[allow(dead_code)]
 pub const BACKEND_ADDRESS: &str = "https://arona.diyigemt.com";
 pub const BACKEND_API_ADDRESS: &str = "https://arona.diyigemt.com/api/v1";
 pub const BACKEND_IMAGE_FOLDER: &str = "/image";
@@ -20,6 +22,8 @@ pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const FUZZY_IMAGE_RESULT: i64 = 0;
 
 /// 远端图片条目（对应原版 entity/ImageResult）
+// 字段按接口返回结构原样映射，未读的是为了对齐上游数据，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ImageResult {
     #[serde(default)]
@@ -35,6 +39,8 @@ pub struct ImageResult {
 }
 
 /// 云端响应外壳（对应原版 entity/ServerResponse）
+// status/message 属于接口响应信封，保留是为了完整反序列化上游结构，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ServerResponse<T> {
     #[serde(default)]
@@ -53,6 +59,8 @@ pub struct ImageRequestResult {
 }
 
 /// 远端动作条目（对应原版 remote/action 的 RemoteActionItem）
+// id/time 是上游动作记录的一部分，保留为了对齐接口结构，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RemoteActionItem {
     #[serde(default)]

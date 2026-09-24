@@ -132,12 +132,11 @@ pub fn start() -> bool {
 
 /// 关闭数据库连接（供备份/恢复前释放文件占用）
 pub fn close() {
-    if let Some(mutex) = DB.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            if let Some(conn) = guard.take() {
-                let _ = conn.close();
-            }
-        }
+    if let Some(mutex) = DB.get()
+        && let Ok(mut guard) = mutex.lock()
+        && let Some(conn) = guard.take()
+    {
+        let _ = conn.close();
     }
 }
 
@@ -157,6 +156,8 @@ pub fn query<T>(f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Option<T>
 }
 
 /// 不依赖已存在连接的文件级操作（备份恢复用）
+// 备份/恢复走的是 arona::runtime::backup 那套，本函数留给库文件自检这类调用方
+#[allow(dead_code)]
 pub fn file_exists() -> bool {
     Path::new(&crate::db_file()).exists()
 }

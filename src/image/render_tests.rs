@@ -31,8 +31,8 @@ fn sample_activities() -> (Vec<Activity>, Vec<Activity>) {
         ("PickUp: 星野(水着)", ActivityType::PickUp, false),
     ];
     for (index, (name, kind, is_active)) in specs.iter().enumerate() {
-        let start = now - 86400_000 * (index as i64 % 3);
-        let end = now + 86400_000 * (index as i64 + 2);
+        let start = now - 86_400_000 * (index as i64 % 3);
+        let end = now + 86_400_000 * (index as i64 + 2);
         let activity = Activity::new(name.to_string(), ServerLocale::JP, start, end, *kind);
         if *is_active {
             active.push(activity);

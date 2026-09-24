@@ -461,10 +461,10 @@ mod tests {
         arona::runtime::services::set_message_sender(sender.clone());
 
         let now = chrono::Utc::now().timestamp_millis();
-        let normal = activity(ActivityType::Activity, now + 2 * 3600_000, "普通活动");
-        let drop = activity(ActivityType::PickUp, now + 6 * 3600_000, "双倍掉落活动");
-        let maintenance = activity(ActivityType::Maintenance, now + 2 * 3600_000, "维护预告");
-        let birthday = activity(ActivityType::Birthday, now + 2 * 3600_000, "角色生日");
+        let normal = activity(ActivityType::Activity, now + 2 * 3_600_000, "普通活动");
+        let drop = activity(ActivityType::PickUp, now + 6 * 3_600_000, "双倍掉落活动");
+        let maintenance = activity(ActivityType::Maintenance, now + 2 * 3_600_000, "维护预告");
+        let birthday = activity(ActivityType::Birthday, now + 2 * 3_600_000, "角色生日");
         let plan = alert_plan(&[normal, drop, maintenance, birthday]);
 
         assert_eq!(plan.len(), 3, "预警计划应有 3 组");
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(targets, vec![910001]);
 
         // 立即发送（1 小时组：1 分钟后到点，落在正负 10 分钟窗口内）
-        let soon = activity(ActivityType::Activity, now + 3600_000 + 60_000, "即将结束");
+        let soon = activity(ActivityType::Activity, now + 3_600_000 + 60_000, "即将结束");
         schedule_alert_group(
             &[soon],
             ServerLocale::JP,
@@ -517,7 +517,7 @@ mod tests {
         // 立即发送（5 小时组：双倍掉落）
         let drop_soon = activity(
             ActivityType::PickUp,
-            now + 5 * 3600_000 + 60_000,
+            now + 5 * 3_600_000 + 60_000,
             "双倍掉落即将结束",
         );
         schedule_alert_group(
@@ -537,7 +537,7 @@ mod tests {
         // 维护活动：特殊文案
         let maintenance_soon = activity(
             ActivityType::Maintenance,
-            now + 3600_000 + 60_000,
+            now + 3_600_000 + 60_000,
             "维护安排",
         );
         schedule_alert_group(
@@ -555,17 +555,17 @@ mod tests {
         // 未来活动 -> 建定时任务；同一活动重复调度 -> 去重
         let far = activity(
             ActivityType::Activity,
-            now + 100 * 3600_000,
+            now + 100 * 3_600_000,
             "很久以后的活动",
         );
         schedule_alert_group(
-            &[far.clone()],
+            std::slice::from_ref(&far),
             ServerLocale::JP,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
         )
         .await;
         schedule_alert_group(
-            &[far.clone()],
+            std::slice::from_ref(&far),
             ServerLocale::JP,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
         )
@@ -573,7 +573,7 @@ mod tests {
         let key = format!(
             "StandaloneActivityNotifyOneHour-{}-{}-{}",
             ServerLocale::JP.command_name(),
-            far.end_time - NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS * 3600_000,
+            far.end_time - NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS * 3_600_000,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS
         );
         assert!(arona::quartz::exists(&key), "未来活动未创建预警定时任务");
@@ -614,7 +614,7 @@ mod tests {
         // 已过期活动 -> 抛弃，不发送也不建任务
         let expired = activity(
             ActivityType::Activity,
-            now - 10 * 3600_000,
+            now - 10 * 3_600_000,
             "早就结束的活动",
         );
         schedule_alert_group(

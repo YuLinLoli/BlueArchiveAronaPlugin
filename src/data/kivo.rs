@@ -46,10 +46,10 @@ pub async fn fetch_students(
 ) -> Result<BTreeMap<i32, Vec<KivoStudent>>, String> {
     {
         let guard = cache().lock().unwrap();
-        if let Some(entry) = guard.get(&server) {
-            if entry.expire_at > now_ms() {
-                return Ok(entry.students.clone());
-            }
+        if let Some(entry) = guard.get(&server)
+            && entry.expire_at > now_ms()
+        {
+            return Ok(entry.students.clone());
         }
     }
     let result = fetch_uncached(server).await?;

@@ -104,8 +104,8 @@ pub struct TrainerFileConfig {
     pub overrides: Vec<TrainerOverride>,
 }
 
-/// 聊天记录配置已上收给框架：住在 `config/arona.yml` 的 `chatlog` 段，
-/// 记账、还原与清理都在 `arona::runtime::chatlog`，插件只用不配。
+// 聊天记录配置已上收给框架：住在 `config/arona.yml` 的 `chatlog` 段，
+// 记账、还原与清理都在 `arona::runtime::chatlog`，插件只用不配。
 
 /// notify 配置项：框架按 (插件 id, 顶层键) 定位到本插件的配置文件
 fn notify_entry() -> ConfigEntry<NotifyConfig> {

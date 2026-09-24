@@ -32,6 +32,8 @@ pub struct GachaStudent {
 }
 
 /// 单个服务器的抽卡池
+// server/pickup_start/pickup_end 是卡池的固有属性（建池与落库时写入），消费方暂未回读
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GachaPool {
     pub server: ServerLocale,
@@ -50,6 +52,8 @@ impl GachaPool {
 }
 
 /// 单次抽卡结果
+// desc_name/dev_name 随学生数据一并带出（对齐 kivo 的学生字段），渲染文本暂未用到
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct DrawResult {
     pub star: i32,
@@ -63,6 +67,8 @@ pub struct DrawResult {
 }
 
 /// 一次抽卡的完整结果
+// hit_pickup 是抽卡报告的固有统计项，图文渲染按 results 现算，故暂未回读
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct DrawReport {
     pub server: ServerLocale,
@@ -344,7 +350,7 @@ pub fn draw(
 }
 
 /// 当期 pickup 角色名改用 GameKee 当期卡池名称
-pub fn apply_pickup_names(results: &mut Vec<DrawResult>, characters: &[GachaCharacter]) {
+pub fn apply_pickup_names(results: &mut [DrawResult], characters: &[GachaCharacter]) {
     if !results.iter().any(|result| result.is_pickup) {
         return;
     }

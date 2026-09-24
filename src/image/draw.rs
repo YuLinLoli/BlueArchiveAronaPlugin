@@ -132,6 +132,8 @@ pub fn fill_rounded(img: &mut RgbaImage, x: i32, y: i32, w: i32, h: i32, r: i32,
 }
 
 /// 垂直渐变圆角矩形
+// 绘图入参本就是矩形几何 + 两端渐变色，凑够 7 个是常态，不为此造参数结构体
+#[allow(clippy::too_many_arguments)]
 pub fn fill_rounded_vgrad(
     img: &mut RgbaImage,
     x: i32,
@@ -167,6 +169,8 @@ pub fn fill_rounded_vgrad(
 }
 
 /// 圆角矩形描边（内缩 thickness 形成圆环）
+// 绘图入参就是矩形几何 + 线宽 + 颜色，天然超 7 个
+#[allow(clippy::too_many_arguments)]
 pub fn stroke_rounded(
     img: &mut RgbaImage,
     x: i32,
@@ -244,6 +248,8 @@ fn dist_to_segment(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 
 }
 
 /// 五角星：先填充渐变，再沿边缘画一圈描边
+// 绘图入参就是星形几何 + 渐变两端色 + 描边色，凑够 8 个是常态
+#[allow(clippy::too_many_arguments)]
 pub fn fill_star(
     img: &mut RgbaImage,
     cx: f64,

@@ -61,10 +61,8 @@ pub fn search_game_name(keyword: &str) -> Vec<(String, i64)> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         let mut out = Vec::new();
-        for row in rows {
-            if let Ok(item) = row {
-                out.push(item);
-            }
+        for item in rows.flatten() {
+            out.push(item);
         }
         Ok(out)
     })
@@ -126,12 +124,16 @@ pub fn reset_limit_of_group(group: i64) {
     });
 }
 
+// 对外能力：清全群次数的兜底入口，当前只用到 reset_limit_of_group 的按群清理
+#[allow(dead_code)]
 pub fn reset_all_limits() {
     let _ = super::query(|conn| conn.execute("UPDATE gacha_limit SET count = 0", []));
 }
 
 // ---------- gacha_history ----------
 
+// gacha_history 的整行映射：qq/grp/pool 是三列主键，读出来后调用方只用得上计数列
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct HistoryRow {
     pub qq: i64,
@@ -222,10 +224,8 @@ fn query_history_all(group: i64, extra_where: &str) -> Vec<HistoryRow> {
             })
         })?;
         let mut out = Vec::new();
-        for row in rows {
-            if let Ok(item) = row {
-                out.push(item);
-            }
+        for item in rows.flatten() {
+            out.push(item);
         }
         Ok(out)
     })
@@ -354,17 +354,15 @@ pub fn load_activities(server: ServerLocale) -> Vec<Activity> {
             ))
         })?;
         let mut out = Vec::new();
-        for row in rows {
-            if let Ok((content, type_name, start, end, _updated)) = row {
-                out.push(Activity {
-                    content,
-                    time: String::new(),
-                    activity_type: ActivityType::from_name(&type_name),
-                    server,
-                    start_time: start,
-                    end_time: end,
-                });
-            }
+        for (content, type_name, start, end, _updated) in rows.flatten() {
+            out.push(Activity {
+                content,
+                time: String::new(),
+                activity_type: ActivityType::from_name(&type_name),
+                server,
+                start_time: start,
+                end_time: end,
+            });
         }
         Ok(out)
     })
@@ -427,6 +425,8 @@ pub fn find_tarot(number: i64) -> Option<TarotRow> {
     .flatten()
 }
 
+// tarot_record 的整行映射：qq/grp 是主键的一部分，保留为了对齐表结构，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct TarotRecordRow {
     pub qq: i64,
@@ -485,10 +485,8 @@ pub fn list_pools_desc(limit: i64) -> Vec<PoolRow> {
             })
         })?;
         let mut out = Vec::new();
-        for row in rows {
-            if let Ok(item) = row {
-                out.push(item);
-            }
+        for item in rows.flatten() {
+            out.push(item);
         }
         Ok(out)
     })
@@ -503,6 +501,8 @@ pub fn create_pool(name: &str) -> i64 {
     .unwrap_or(0)
 }
 
+// 对外能力：删卡池的兜底入口，配套 create_pool/find_pool_by_name，当前命令层未挂上
+#[allow(dead_code)]
 pub fn delete_pool(pool_id: i64) {
     let _ = super::query(|conn| {
         conn.execute(
@@ -558,10 +558,8 @@ pub fn pool_characters(pool_id: i64) -> Vec<(String, i64)> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         let mut out = Vec::new();
-        for row in rows {
-            if let Ok(item) = row {
-                out.push(item);
-            }
+        for item in rows.flatten() {
+            out.push(item);
         }
         Ok(out)
     })
@@ -604,6 +602,8 @@ pub fn add_pool_character(pool_id: i64, character_id: i64) {
 
 // ---------- image（arona 云端图片库本地缓存，对应原版 db/image/ImageTable） ----------
 
+// image 表的整行映射：name/type 是检索与分类列，保留为了对齐表结构，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ImageRow {
     pub id: i64,

@@ -14,10 +14,14 @@ pub const REFERER: &str = "https://www.gamekee.com/ba/";
 pub enum GachaServer {
     JP,
     CN,
+    // 与 GameKee 接口/日志里出现的服名一致，改名会牵动外部口径，不跟随 clippy 的小写建议
+    #[allow(clippy::upper_case_acronyms)]
     GLOBAL,
 }
 
 impl GachaServer {
+    // 与 from_server_id 成对的对外能力，当前调用方走 display_name/URL，保留给按 id 请求的分支
+    #[allow(dead_code)]
     pub fn server_id(self) -> i64 {
         match self {
             GachaServer::JP => 15,
@@ -45,6 +49,8 @@ impl GachaServer {
 }
 
 /// 当期卡池角色
+// 字段按 GameKee indexV2 返回结构整体映射，未读的是为了对齐上游数据，不是漏用
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GachaCharacter {
     pub id: i64,

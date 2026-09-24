@@ -424,7 +424,7 @@ fn connection_text(config: &OneBotConfig) -> String {
             "{}. {} {}",
             index + 1,
             conn_type.display_name(),
-            address(&connection, conn_type)
+            address(connection, conn_type)
         ));
     }
     format!("已启用的 OneBot 连接:\n{}", lines.join("\n"))

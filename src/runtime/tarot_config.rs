@@ -32,6 +32,8 @@ pub fn image() -> bool {
 }
 
 /// 供运行期切换是否附带塔罗牌图片
+// 对外能力：目前开关只由配置文件决定（image=true 常量语义），保留给运行期指令/联调切换
+#[allow(dead_code)]
 pub fn set_image(enabled: bool) {
     instance().write().unwrap().image = enabled;
 }

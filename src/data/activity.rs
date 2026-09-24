@@ -173,7 +173,7 @@ fn insert(
 }
 
 /// 按活动类型权重降序整理（对应 sortAndPackage）
-fn sort_and_package(active: &mut Vec<Activity>, pending: &mut Vec<Activity>) {
+fn sort_and_package(active: &mut [Activity], pending: &mut [Activity]) {
     active.sort_by_key(|a| std::cmp::Reverse(type_level(a.activity_type)));
     pending.sort_by_key(|a| std::cmp::Reverse(type_level(a.activity_type)));
 }

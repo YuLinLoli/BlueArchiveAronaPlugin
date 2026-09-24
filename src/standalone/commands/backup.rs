@@ -60,7 +60,7 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
         return OutgoingMessage::text(format!("备份的 arona.yml 解析失败: {err}"));
     }
     arona::runtime::log::info(format!("开始恢复备份: {name}"));
-    let _ = quartz::pause_all();
+    quartz::pause_all();
     db::close();
     let arona_file = config::standalone::default_file();
     if let Err(err) = std::fs::copy(&restored_arona, &arona_file) {
@@ -90,7 +90,7 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
     }
     let _ = config::standalone::init(arona_file);
     let _ = db::start();
-    let _ = quartz::resume_all();
+    quartz::resume_all();
     let notice = if restored_onebot.is_file() {
         "\n注: onebot.yml 连接配置已恢复, 重启后生效"
     } else {
@@ -101,7 +101,7 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
 
 fn fail_restore(err: String) -> OutgoingMessage {
     let _ = db::start();
-    let _ = quartz::resume_all();
+    quartz::resume_all();
     OutgoingMessage::text(format!("恢复失败: {err}"))
 }
 
@@ -117,7 +117,7 @@ fn create_backup() -> OutgoingMessage {
     let absolute = std::env::current_dir()
         .map(|cwd| cwd.join(&zip_file))
         .unwrap_or_else(|_| zip_file.clone());
-    let _ = quartz::pause_all();
+    quartz::pause_all();
     db::close();
     let result = (|| -> Result<(), String> {
         let file = File::create(&zip_file).map_err(|err| format!("创建备份文件失败: {err}"))?;
@@ -152,7 +152,7 @@ fn create_backup() -> OutgoingMessage {
         Ok(())
     })();
     let _ = db::start();
-    let _ = quartz::resume_all();
+    quartz::resume_all();
     match result {
         Ok(()) => OutgoingMessage::text(format!(
             "备份完成: {}\n路径: {}",

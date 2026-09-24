@@ -31,9 +31,12 @@ pub struct Birthday {
     pub day: u32,
 }
 
-static CACHE: OnceCell<Mutex<Option<(Vec<Birthday>, i64)>>> = OnceCell::new();
+/// 生日缓存内容：（学生生日列表, 过期时间戳毫秒），None 表示尚未同步
+type BirthdayCache = Mutex<Option<(Vec<Birthday>, i64)>>;
 
-fn cache() -> &'static Mutex<Option<(Vec<Birthday>, i64)>> {
+static CACHE: OnceCell<BirthdayCache> = OnceCell::new();
+
+fn cache() -> &'static BirthdayCache {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -45,10 +48,10 @@ fn now_ms() -> i64 {
 pub async fn fetch_birthdays() -> Result<Vec<Birthday>, String> {
     {
         let guard = cache().lock().unwrap();
-        if let Some((list, expire_at)) = guard.as_ref() {
-            if *expire_at > now_ms() {
-                return Ok(list.clone());
-            }
+        if let Some((list, expire_at)) = guard.as_ref()
+            && *expire_at > now_ms()
+        {
+            return Ok(list.clone());
         }
     }
     let mut last_error = "没有可用的 SchaleDB 数据源".to_string();
@@ -154,7 +157,7 @@ pub fn birthday_activities_for(
             continue;
         };
         let days = (date - today).num_days();
-        if days < 1 || days >= WINDOW_DAYS {
+        if !(1..WINDOW_DAYS).contains(&days) {
             continue;
         }
         let Some(naive) = date.and_hms_opt(0, 0, 0) else {

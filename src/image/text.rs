@@ -83,6 +83,8 @@ pub fn draw_line(
 }
 
 /// 垂直居中绘制文字: area 范围内单行水平居中、块内垂直居中
+// 绘图入参就是目标区域几何 + 字号 + 颜色，天然超 7 个
+#[allow(clippy::too_many_arguments)]
 pub fn draw_centered(
     img: &mut RgbaImage,
     text: &str,
@@ -113,10 +115,10 @@ fn load_face(bytes: &[u8]) -> Option<fontdue::Font> {
             collection_index: index,
             ..Default::default()
         };
-        if let Ok(font) = fontdue::Font::from_bytes(bytes, settings) {
-            if is_cjk(&font) {
-                return Some(font);
-            }
+        if let Ok(font) = fontdue::Font::from_bytes(bytes, settings)
+            && is_cjk(&font)
+        {
+            return Some(font);
         }
     }
     None
