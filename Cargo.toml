@@ -20,11 +20,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Arona 框架：按 git 标签依赖，与本仓库发布说明里写的宿主版本一一对应。
 # 只有在改框架本体、要立刻编译验证时才临时切回相邻目录的 path 依赖，改完切回来：
-#   arona = { git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.0.0", default-features = false }
-# 当前停在 path：本轮把框架的 `arona::config::standalone` 改成了 `arona::config::settings`，
-# 那个名字不在已推送的 v1.0.0 里，要等下一个标签发出来才能切回去。
+#   arona = { package = "arona-rs", git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.1.0", default-features = false }
+# 当前停在 path：v1.1.0 这个标签还只在本地没推出去，而符号布局 5 那批接口（Bot/Group/Member 对象模型、
+# 聊天记录库走宿主侧 trait 出口、Image 句柄）都不在已推送的 v1.0.0 里。
+# 框架的发布名换成了 arona-rs（`arona` 在 crates.io 上早被别的项目占了），库名仍是 arona，
+# 所以源码里的 `use arona::…` 一个字都不用改，只在依赖行重命名一次。
 # gui 由宿主决定，插件这边一律不强制打开（框架的 PLUGIN_DEVELOPMENT.md §16）。
-arona = { path = "../Arona-rs/crates/arona", version = "1.0.0", default-features = false }
+arona = { package = "arona-rs", path = "../Arona-rs/crates/arona", version = "1.1.0", default-features = false }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

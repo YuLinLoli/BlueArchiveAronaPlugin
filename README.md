@@ -47,7 +47,7 @@
 3. 启动框架。日志里应该有握手通过与装载成功两行，GUI 的「插件管理」页同时就能看到它：
 
    ```
-   [Arona] 插件 ABI 握手通过: 布局 2，契约 1.0.0
+   [Arona] 插件 ABI 握手通过: 布局 5，契约 1.0.0
    [Arona] 已装载动态插件: BluearchivePlugin 0.4.0 (bluearchive_plugin.dll)
    ```
 
@@ -71,7 +71,7 @@ dll 与宿主跑在同一个进程里，而 `arona` 是被静态链接进 dll �
 
 | 项 | 本仓库怎么对齐 |
 | --- | --- |
-| `arona` 版本 + 除 `gui`/`default` 外的 feature 集合 | 依赖写 `version = "1.0.0"`，且 `default-features = false`（不替宿主决定 GUI） |
+| `arona` 版本 + 除 `gui`/`default` 外的 feature 集合 | 依赖写 `package = "arona-rs", version = "1.1.0"`，且 `default-features = false`（不替宿主决定 GUI）。框架在 crates.io 上的发布名带 `-rs`，库名仍是 `arona`，所以 `use arona::…` 不用改 |
 | rustc 版本（`rustc -vV` 的 release 行） | 钉在仓库根的 `rust-toolchain.toml`，`cargo build` 自动选中它；要和宿主对上就得和框架仓库那一行**逐字相同** |
 | 目标三元组 | `x86_64-pc-windows-msvc` |
 | profile | 宿主是 release，插件也必须 `--release` |
@@ -90,9 +90,10 @@ cargo clippy --all-targets
 ```
 
 `Cargo.toml` 里对框架暂时用的是相邻目录的 path 依赖（`../Arona-rs/crates/arona`），改框架立刻能编。
-发布口径是 git 标签依赖（`tag = "v1.0.0"`）——本轮把框架的 `arona::config::standalone` 改名成了
-`arona::config::settings`，那个名字不在已推送的 `v1.0.0` 里，要等下一个标签发出来才切得回去。
-要把这个仓库发给别人用时，换成 git 标签依赖再提交 —— 注释里写着具体那一行。
+发布口径是 git 标签或 crates.io 依赖（`arona = { package = "arona-rs", version = "1.1.0", … }`）——
+符号布局 5 那批接口（`Bot`/`Group`/`Member` 对象模型、聊天记录库走宿主侧 trait 出口、`Image` 句柄）
+都不在已推送的 `v1.0.0` 里，而 `v1.1.0` 这个标签还只在本地没推出去，所以这里先停在 path。
+要把这个仓库发给别人用时，换成 git 标签或 crates.io 依赖再提交 —— 注释里写着具体那一行。
 
 调试：把编出的 dll 拷进框架运行目录的 `plugins\bluearchive\`，在那个目录里跑
 `arona-rs.exe --nogui`（命令行模式，日志直接进控制台）。本 crate 没有 `main`，也**不该有**：
@@ -101,7 +102,7 @@ cargo clippy --all-targets
 
 ## 与框架的版本关系
 
-本仓库按 `arona = 1.0.0` 的插件契约开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
+本仓库按 `arona-rs 1.1.0`（符号布局 5、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
 `PluginContext` 运行期能力）。契约允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
 提交里把示例插件（框架仓库的 `plugins/hello`）改到能编译，本仓库跟着同步一次。升级框架后
 重新 `cargo build --release` 就行——真混了版本，握手会在装载那一步替你挡下来。
