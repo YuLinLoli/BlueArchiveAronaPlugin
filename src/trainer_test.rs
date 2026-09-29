@@ -30,12 +30,16 @@ impl MessageSender for CaptureSender {
 fn setup() -> (
     Arc<arona::runtime::dispatcher::CommandDispatcher>,
     Arc<CaptureSender>,
-    i64,
+    Arc<arona::framework::Framework>,
 ) {
     arona::runtime::paths::prepare();
-    arona::runtime::services::set_data_root(arona::runtime::paths::data_root());
-    arona::runtime::config::set_bot_id(10000);
-    arona::runtime::config::set_end_with_sensei("老师".to_string());
+    // 隔离实例：数据目录 / 机器人配置 / 命令表都在这一套上，不覆写进程默认实例
+    let framework = arona::framework::Framework::new();
+    framework
+        .runtime_services()
+        .set_data_root(arona::runtime::paths::data_root());
+    framework.gating().set_bot_id(10000);
+    framework.gating().set_end_with_sensei("老师".to_string());
     assert!(crate::db::start(), "数据库初始化失败");
     let config = arona::config::onebot::OneBotConfig {
         self_id: 10000,
@@ -43,15 +47,20 @@ fn setup() -> (
         send_image_as_file: false,
         connections: std::collections::BTreeMap::new(),
     };
-    crate::dispatcher::register_into_table(config);
-    let dispatcher = Arc::new(arona::runtime::dispatcher::CommandDispatcher::new());
+    crate::dispatcher::register_into(&framework, config);
+    let dispatcher =
+        Arc::new(arona::runtime::dispatcher::CommandDispatcher::with_framework(&framework));
     let sender = Arc::new(CaptureSender {
         sent: Mutex::new(Vec::new()),
     });
-    (dispatcher, sender, 10001)
+    (dispatcher, sender, framework)
 }
 
-fn context(sender: Arc<CaptureSender>, text: &str) -> Arc<CommandContext> {
+fn context(
+    sender: Arc<CaptureSender>,
+    text: &str,
+    framework: &Arc<arona::framework::Framework>,
+) -> Arc<CommandContext> {
     Arc::new(CommandContext {
         user_id: 10001,
         group_id: Some(900000001),
@@ -64,9 +73,7 @@ fn context(sender: Arc<CaptureSender>, text: &str) -> Arc<CommandContext> {
         quoted: None,
         segments: Vec::new(),
         sender,
-        // 上下文末尾那个实例字段是 dll 会按编译期偏移读的跨镜像布局，
-        // 测试里挂一套隔离实例即可（这些用例只用到 sender 那份记账）
-        framework: arona::framework::Framework::new(),
+        framework: framework.clone(),
     })
 }
 
@@ -100,9 +107,9 @@ fn forward_of(message: &OutgoingMessage) -> Option<(String, Vec<ForwardMessage>)
 #[ignore = "联网自检, 运行: cargo test trainer_smoke -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn trainer_activity_guide_downloads_images() {
-    let (dispatcher, sender, _) = setup();
+    let (dispatcher, sender, framework) = setup();
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/攻略 日服活动"))
+        .dispatch(context(sender.clone(), "/攻略 日服活动", &framework))
         .await;
     assert!(handled, "调度器未识别 /攻略");
     let messages = take_messages(&sender);
@@ -120,9 +127,9 @@ async fn trainer_activity_guide_downloads_images() {
 #[ignore = "联网自检, 运行: cargo test trainer_smoke -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn trainer_schedule_note_forwards_images() {
-    let (dispatcher, sender, _) = setup();
+    let (dispatcher, sender, framework) = setup();
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/攻略 日程笔记"))
+        .dispatch(context(sender.clone(), "/攻略 日程笔记", &framework))
         .await;
     assert!(handled, "调度器未识别 /攻略");
     let messages = take_messages(&sender);
@@ -143,9 +150,9 @@ async fn trainer_schedule_note_forwards_images() {
 #[ignore = "联网自检, 运行: cargo test trainer_smoke -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn trainer_gacha_pool_forward_contains_images() {
-    let (dispatcher, sender, _) = setup();
+    let (dispatcher, sender, framework) = setup();
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/攻略 日服卡池"))
+        .dispatch(context(sender.clone(), "/攻略 日服卡池", &framework))
         .await;
     assert!(handled, "调度器未识别 /攻略");
     let messages = take_messages(&sender);
@@ -176,10 +183,10 @@ async fn trainer_gacha_pool_forward_contains_images() {
 #[ignore = "联网自检, 运行: cargo test trainer_smoke -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn trainer_cloud_image_and_numeric_reply() {
-    let (dispatcher, sender, _) = setup();
+    let (dispatcher, sender, framework) = setup();
     // 精确命中
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/攻略 阿罗娜"))
+        .dispatch(context(sender.clone(), "/攻略 阿罗娜", &framework))
         .await;
     assert!(handled);
     let messages = take_messages(&sender);
@@ -192,7 +199,7 @@ async fn trainer_cloud_image_and_numeric_reply() {
 
     // 模糊命中 -> 建议 -> 数字回复
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/攻略 学生"))
+        .dispatch(context(sender.clone(), "/攻略 学生", &framework))
         .await;
     assert!(handled);
     let messages = take_messages(&sender);
@@ -207,7 +214,7 @@ async fn trainer_cloud_image_and_numeric_reply() {
         .expect("模糊关键词未返回建议列表");
     println!("[模糊建议]\n{suggestion}");
 
-    let reply_context = context(sender.clone(), "1");
+    let reply_context = context(sender.clone(), "1", &framework);
     let reply = crate::commands::trainer::resolve_numeric_reply(reply_context).await;
     let reply = reply.expect("数字回复未命中待选建议");
     let files: Vec<String> = image_files(&reply);
@@ -221,9 +228,9 @@ async fn trainer_cloud_image_and_numeric_reply() {
 #[ignore = "联网自检, 运行: cargo test trainer_test -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn activity_command_returns_text() {
-    let (dispatcher, sender, _) = setup();
+    let (dispatcher, sender, framework) = setup();
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/活动 日服"))
+        .dispatch(context(sender.clone(), "/活动 日服", &framework))
         .await;
     assert!(handled, "调度器未识别 /活动");
     let messages = take_messages(&sender);
@@ -267,7 +274,7 @@ async fn activity_command_returns_text() {
         .and_then(|meta| meta.modified())
         .ok();
     let handled = dispatcher
-        .dispatch(context(sender.clone(), "/活动 日服"))
+        .dispatch(context(sender.clone(), "/活动 日服", &framework))
         .await;
     assert!(handled, "调度器未识别 /活动");
     let cached: Vec<String> = take_messages(&sender)

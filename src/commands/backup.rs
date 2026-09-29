@@ -4,8 +4,7 @@
 
 use crate::db;
 use arona::config;
-use arona::config::plugin_config;
-use arona::quartz;
+use arona::framework::Framework;
 use arona::runtime::message::OutgoingMessage;
 use std::fs::File;
 use std::io::Write;
@@ -14,8 +13,16 @@ use std::path::{Path, PathBuf};
 /// 插件自己的 arona.yml 在压缩包里的条目名（框架那份叫 arona.yml，两者不能撞名）
 const PLUGIN_CONFIG_ENTRY: &str = "plugin-arona.yml";
 
+/// 本实例真正在用的 arona.yml：没绑定过文件时退回约定位置
+fn arona_file(framework: &Framework) -> PathBuf {
+    framework
+        .settings()
+        .config_file()
+        .unwrap_or_else(config::settings::default_file)
+}
+
 /// /备份 [list|列表]
-pub fn backup(arguments: &[String]) -> OutgoingMessage {
+pub fn backup(framework: &Framework, arguments: &[String]) -> OutgoingMessage {
     match arguments
         .first()
         .map(|s| s.to_lowercase())
@@ -23,13 +30,13 @@ pub fn backup(arguments: &[String]) -> OutgoingMessage {
         .as_str()
     {
         "list" | "列表" => list_backups(),
-        "" => create_backup(),
+        "" => create_backup(framework),
         _ => OutgoingMessage::text("用法: /备份 创建备份; /备份 list 查看已有备份"),
     }
 }
 
 /// /恢复 <备份文件名>
-pub fn restore(name: Option<&str>) -> OutgoingMessage {
+pub fn restore(framework: &Framework, name: Option<&str>) -> OutgoingMessage {
     let Some(name) = name.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return OutgoingMessage::text("用法: /恢复 <备份文件名>，可用 /备份 list 查看");
     };
@@ -42,12 +49,17 @@ pub fn restore(name: Option<&str>) -> OutgoingMessage {
     }
     let temp_dir = std::env::temp_dir().join(format!("arona-restore-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::create_dir_all(&temp_dir);
-    let result = do_restore(&zip_file, &temp_dir, name);
+    let result = do_restore(framework, &zip_file, &temp_dir, name);
     let _ = std::fs::remove_dir_all(&temp_dir);
     result
 }
 
-fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
+fn do_restore(
+    framework: &Framework,
+    zip_file: &Path,
+    temp_dir: &Path,
+    name: &str,
+) -> OutgoingMessage {
     let entries = match extract(zip_file, temp_dir) {
         Ok(entries) => entries,
         Err(err) => return OutgoingMessage::text(format!("恢复失败: {err}")),
@@ -56,41 +68,41 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
     if !entries.iter().any(|e| e == "arona.yml") || !restored_arona.is_file() {
         return OutgoingMessage::text("备份中缺少 arona.yml，无法恢复");
     }
-    if let Err(err) = config::arona::load(&restored_arona) {
+    if let Err(err) = config::arona::load_in(framework, &restored_arona) {
         return OutgoingMessage::text(format!("备份的 arona.yml 解析失败: {err}"));
     }
     arona::runtime::log::info(format!("开始恢复备份: {name}"));
-    quartz::pause_all();
+    framework.jobs().pause_all();
     db::close();
-    let arona_file = config::settings::default_file();
+    let arona_file = arona_file(framework);
     if let Err(err) = std::fs::copy(&restored_arona, &arona_file) {
-        return fail_restore(format!("覆盖 arona.yml 失败: {err}"));
+        return fail_restore(framework, format!("覆盖 arona.yml 失败: {err}"));
     }
     let restored_onebot = temp_dir.join("onebot.yml");
     if restored_onebot.is_file() {
         let onebot_file = config::onebot::default_file();
         if let Err(err) = std::fs::copy(&restored_onebot, &onebot_file) {
-            return fail_restore(format!("覆盖 onebot.yml 失败: {err}"));
+            return fail_restore(framework, format!("覆盖 onebot.yml 失败: {err}"));
         }
     }
     if let Err(err) = restore_data_dir(&temp_dir.join("data")) {
-        return fail_restore(format!("恢复数据目录失败: {err}"));
+        return fail_restore(framework, format!("恢复数据目录失败: {err}"));
     }
     // 插件自己的配置区：旧备份里没有这一项，缺省时保持现状不动
     let restored_plugin_config = temp_dir.join(PLUGIN_CONFIG_ENTRY);
     if restored_plugin_config.is_file() {
-        let target = plugin_config::config_file(crate::PLUGIN_ID);
+        let target = framework.configs().config_file(crate::PLUGIN_ID);
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(err) = std::fs::copy(&restored_plugin_config, &target) {
-            return fail_restore(format!("覆盖插件配置失败: {err}"));
+            return fail_restore(framework, format!("覆盖插件配置失败: {err}"));
         }
-        plugin_config::reload_all();
+        framework.configs().reload_all();
     }
-    let _ = config::settings::init(arona_file);
+    let _ = framework.settings().init(arona_file);
     let _ = db::start();
-    quartz::resume_all();
+    framework.jobs().resume_all();
     let notice = if restored_onebot.is_file() {
         "\n注: onebot.yml 连接配置已恢复, 重启后生效"
     } else {
@@ -99,14 +111,14 @@ fn do_restore(zip_file: &Path, temp_dir: &Path, name: &str) -> OutgoingMessage {
     OutgoingMessage::text(format!("恢复完成: {name}{notice}"))
 }
 
-fn fail_restore(err: String) -> OutgoingMessage {
+fn fail_restore(framework: &Framework, err: String) -> OutgoingMessage {
     let _ = db::start();
-    quartz::resume_all();
+    framework.jobs().resume_all();
     OutgoingMessage::text(format!("恢复失败: {err}"))
 }
 
-fn create_backup() -> OutgoingMessage {
-    let arona_file = config::settings::default_file();
+fn create_backup(framework: &Framework) -> OutgoingMessage {
+    let arona_file = arona_file(framework);
     if !arona_file.is_file() {
         return OutgoingMessage::text("arona.yml 不存在，无法备份");
     }
@@ -117,7 +129,7 @@ fn create_backup() -> OutgoingMessage {
     let absolute = std::env::current_dir()
         .map(|cwd| cwd.join(&zip_file))
         .unwrap_or_else(|_| zip_file.clone());
-    quartz::pause_all();
+    framework.jobs().pause_all();
     db::close();
     let result = (|| -> Result<(), String> {
         let file = File::create(&zip_file).map_err(|err| format!("创建备份文件失败: {err}"))?;
@@ -128,7 +140,7 @@ fn create_backup() -> OutgoingMessage {
         if onebot_file.is_file() {
             write_entry(&mut zip, options, "onebot.yml", &onebot_file)?;
         }
-        let own_config = plugin_config::config_file(crate::PLUGIN_ID);
+        let own_config = framework.configs().config_file(crate::PLUGIN_ID);
         if own_config.is_file() {
             write_entry(&mut zip, options, PLUGIN_CONFIG_ENTRY, &own_config)?;
         }
@@ -152,7 +164,7 @@ fn create_backup() -> OutgoingMessage {
         Ok(())
     })();
     let _ = db::start();
-    quartz::resume_all();
+    framework.jobs().resume_all();
     match result {
         Ok(()) => OutgoingMessage::text(format!(
             "备份完成: {}\n路径: {}",

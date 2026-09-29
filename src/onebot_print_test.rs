@@ -22,9 +22,12 @@ const MARKER: &str = "端到端时序标记-0xdeadbeef";
 
 #[tokio::test]
 async fn group_message_is_logged_immediately_over_ws_forward() {
-    arona::runtime::config::set_bot_id(10000);
-    // 独立的日志文件/数据目录，避免污染仓库
-    arona::runtime::services::set_data_root(arona::runtime::paths::data_root());
+    // 隔离实例：bot_id/数据目录都挂在自己这套注册表上，不覆写进程默认实例
+    let framework = arona::framework::Framework::new();
+    framework.gating().set_bot_id(10000);
+    framework
+        .runtime_services()
+        .set_data_root(arona::runtime::paths::data_root());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -81,10 +84,12 @@ async fn group_message_is_logged_immediately_over_ws_forward() {
     }
     let registry = Arc::new(ConnectionRegistry::new());
     // 这条用例只关心「收到消息先打印」的时序，不需要任何命令
+    let dispatcher =
+        Arc::new(arona::runtime::dispatcher::CommandDispatcher::with_framework(&framework));
     let business = Arc::new(BusinessHandler::new(
         config.clone(),
-        arona::framework::Framework::global_arc(),
-        Arc::new(arona::runtime::dispatcher::CommandDispatcher::new()),
+        framework,
+        dispatcher,
         registry.clone(),
     ));
     let app = Arc::new(OneBotApplication::new(config.clone(), business, registry));

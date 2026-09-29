@@ -9,12 +9,16 @@ use crate::data;
 use crate::db::dao;
 use crate::entity::{Activity, ActivityType, ServerLocale};
 use crate::util::time::calc_time;
-use arona::quartz;
+use arona::framework::Framework;
+use arona::plugin::PluginContext;
+use arona::quartz::JobFn;
 use arona::runtime::dispatcher::CommandContext;
 use arona::runtime::message::OutgoingMessage;
 use std::sync::Arc;
 
 const CACHE_VALID_MILLS: i64 = 12 * 60 * 60 * 1000;
+/// 每日 0 点全量刷新本地活动图片的任务名
+const DAILY_REFRESH_JOB: &str = "AronaActivityImageRefreshDaily";
 
 /// /活动 [日服|国服|国际服]
 pub async fn activity(
@@ -158,20 +162,24 @@ pub async fn refresh_all_images() {
     }
 }
 
-/// 注册每日 0 点刷新本地活动图片的定时任务(独立启动时调用)。
+/// 注册每日 0 点刷新本地活动图片的定时任务(启动时调用)。
 /// 任务组用插件 id：插件被停用时由框架整组回收。
-pub fn enable_image_refresh_job() {
-    quartz::create_daily(
-        0,
-        "AronaActivityImageRefreshDaily",
-        crate::PLUGIN_ID,
-        Arc::new(|| {
-            crate::in_scope("刷新活动图", async move {
-                refresh_all_images().await;
-            });
-        }),
-    );
+pub fn enable_image_refresh_job(ctx: &PluginContext) {
+    let scheduled = ctx.clone();
+    let body: JobFn = Arc::new(move || {
+        scheduled.spawn_as("刷新活动图", async move {
+            refresh_all_images().await;
+        });
+    });
+    schedule_daily_refresh(ctx.framework(), body);
     arona::runtime::log::info("本地活动图片刷新任务已启用: 每天 0 点");
+}
+
+/// 排期那一层（收 `&Framework`、任务体由调用方给）：单测据此核对触发时刻，不必真去联网
+fn schedule_daily_refresh(framework: &Framework, body: JobFn) {
+    framework
+        .jobs()
+        .create_daily(0, DAILY_REFRESH_JOB, crate::PLUGIN_ID, body);
 }
 
 #[cfg(test)]
@@ -179,14 +187,18 @@ mod tests {
     use super::*;
     use chrono::Timelike;
 
-    /// 每日 0 点刷新本地活动图片的任务: 注册成功且下次触发为 0 点整
+    /// 每日 0 点刷新本地活动图片的任务: 注册成功且下次触发为 0 点整。
+    /// 排期挂在**用例自己造的框架实例**上，任务体给个空的即可——这里验的是时刻不是联网。
     #[tokio::test]
     async fn image_refresh_job_registered_at_midnight() {
-        enable_image_refresh_job();
+        let framework = arona::framework::Framework::new();
+        schedule_daily_refresh(&framework, Arc::new(|| {}));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let info = arona::quartz::list()
+        let info = framework
+            .jobs()
+            .list()
             .into_iter()
-            .find(|task| task.name == "AronaActivityImageRefreshDaily")
+            .find(|task| task.name == DAILY_REFRESH_JOB)
             .expect("未注册每日图片刷新任务");
         let next = info.next_fire_ms.expect("每日图片刷新任务没有下次触发时间");
         let fire_at = chrono::DateTime::from_timestamp_millis(next)
@@ -196,6 +208,6 @@ mod tests {
         assert_eq!(fire_at.minute(), 0);
         assert_eq!(fire_at.second(), 0);
         println!("[本地图片刷新] 下次触发: {fire_at}");
-        arona::quartz::remove("AronaActivityImageRefreshDaily");
+        framework.jobs().remove(DAILY_REFRESH_JOB);
     }
 }

@@ -3,12 +3,14 @@
 use crate::api;
 use crate::commands::{self, emergency::EmergencyStop};
 use arona::config::onebot::{ConnectionConfig, ConnectionType, OneBotConfig};
+use arona::framework::Framework;
 use arona::plugin::PluginContext;
 use arona::runtime::dispatcher::{
     CommandContext, CommandHandler, CommandInfo, CommandRegistration, FallbackHandler, Permission,
     fallback, handler,
 };
 use arona::runtime::message::OutgoingMessage;
+use arona::runtime::priority::CommandPriority;
 use arona::services;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -17,12 +19,7 @@ use std::sync::{Arc, Mutex};
 /// 把本插件的全部命令与兜底登记进框架的命令表（configure 阶段调用）。
 /// 命令名与别家插件撞车时由框架按优先级裁决并记日志，本插件其余命令照常生效。
 pub fn register(ctx: &PluginContext, config: OneBotConfig) {
-    let overview = {
-        let ctx = ctx.clone();
-        Arc::new(move || ctx.own_commands()) as CommandOverview
-    };
-    ctx.commands(registrations(config, ctx.service_board().clone(), overview));
-    ctx.fallback(numeric_reply());
+    register_into(ctx.framework(), config);
 }
 
 /// 本插件命令表的现读句柄：帮助页要的是**登记成功**的那些命令，而不是这里手写的一份清单
@@ -181,22 +178,23 @@ pub fn registrations(
         CommandRegistration::new(
             vec!["/任务".into(), "/task".into()],
             "查看/触发定时任务(管理员)",
-            commands::guarded_arg_handler(service("定时任务"), |_context, arguments| async move {
-                Some(commands::task_cmd::handle(&arguments))
+            commands::guarded_arg_handler(service("定时任务"), |context, arguments| async move {
+                Some(commands::task_cmd::handle(&context.framework, &arguments))
             }),
         ),
         CommandRegistration::new(
             vec!["/备份".into(), "/backup".into()],
             "备份配置与数据库(管理员)",
-            commands::guarded_arg_handler(service("备份恢复"), |_context, arguments| async move {
-                Some(commands::backup::backup(&arguments))
+            commands::guarded_arg_handler(service("备份恢复"), |context, arguments| async move {
+                Some(commands::backup::backup(&context.framework, &arguments))
             }),
         ),
         CommandRegistration::new(
             vec!["/恢复".into(), "/restore".into()],
             "从备份恢复配置与数据库(管理员)",
-            commands::guarded_arg_handler(service("备份恢复"), |_context, arguments| async move {
+            commands::guarded_arg_handler(service("备份恢复"), |context, arguments| async move {
                 Some(commands::backup::restore(
+                    &context.framework,
                     arguments.first().map(|s| s.as_str()),
                 ))
             }),
@@ -228,17 +226,22 @@ pub fn numeric_reply() -> Arc<dyn FallbackHandler> {
     })
 }
 
-/// 自测用：没有框架装配出来的上下文，直接按本插件 id 登进全局命令表
-#[cfg(test)]
-pub(crate) fn register_into_table(config: OneBotConfig) {
-    use arona::runtime::priority::CommandPriority;
+/// 把本插件的命令与兜底登进**这一套**框架实例：装配路径（[`register`]）与自测
+/// （各自 `Framework::new()`）共用这里一条通道，用例之间不再抢同一份进程级命令表。
+pub fn register_into(framework: &Arc<Framework>, config: OneBotConfig) {
     let overview = {
-        Arc::new(|| arona::runtime::dispatcher::commands_of(crate::PLUGIN_ID)) as CommandOverview
+        let framework = framework.clone();
+        Arc::new(move || framework.commands().commands_of(crate::PLUGIN_ID)) as CommandOverview
     };
-    for registration in registrations(config, services::global_board(), overview) {
-        arona::runtime::dispatcher::register(crate::PLUGIN_ID, registration);
+    for registration in registrations(config, framework.services().clone(), overview) {
+        for problem in framework
+            .commands()
+            .register(crate::PLUGIN_ID, registration)
+        {
+            arona::runtime::log::warning(format!("[{}] {problem}", crate::PLUGIN_ID));
+        }
     }
-    arona::runtime::dispatcher::register_fallback(
+    let _ = framework.commands().register_fallback(
         crate::PLUGIN_ID,
         numeric_reply(),
         CommandPriority::default(),
@@ -295,7 +298,7 @@ async fn handle_arona(
         .unwrap_or_default()
         .as_str()
     {
-        "" | "status" | "状态" => status_text(config),
+        "" | "status" | "状态" => status_text(config, &context.framework),
         "version" | "版本" => version_text(),
         "help" | "帮助" => help_text(overview),
         "service" | "services" | "连接" => {
@@ -348,13 +351,15 @@ async fn handle_service(
     }
 }
 
-fn status_text(config: &OneBotConfig) -> String {
+fn status_text(config: &OneBotConfig, framework: &Framework) -> String {
     let enabled = config
         .connections
         .values()
         .filter(|conn| conn.enable)
         .count();
-    let data_root = arona::runtime::services::data_root()
+    let data_root = framework
+        .runtime_services()
+        .data_root()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "未设置".to_string());
     format!(

@@ -2,15 +2,21 @@
 //!
 //! 这两块配置住在框架给本插件划的配置文件 `config/bluearchive/arona.yml` 里（顶层键
 //! `notify` / `trainer`），框架不理解其内容：插件只写 serde 结构 + 实现
-//! [`arona::config::arona::PluginConfig`] 给出字段注释，[`register_sections`] 把它们登记
-//! 给框架，带注释模板的生成、原样 YAML 的加载与文件改动后的热重载全部由框架完成。
-//! 运行期用 [`notify`] / [`trainer`] 读取，`/config` 改 notify 时用 [`set_notify`] 写回。
+//! [`arona::config::arona::PluginConfig`] 给出字段注释，`install` 阶段用
+//! `reg.config::<T>(键)` 登记，带注释模板的生成、原样 YAML 的加载与文件改动后的热重载
+//! 全部由框架完成。运行期用 [`notify`] / [`trainer`] 读取，`/config` 改 notify 时用
+//! [`set_notify`] 写回。
+//!
+//! 下面这几个读入口都收一个 `&Framework`：**取哪一套配置由调用方决定**
+//! （`ctx.framework()` / `CommandContext::framework`），本模块不碰 `Framework::global()`
+//! 那条进程默认实例通道——它在单测里造不出第二份，多插件并存时也共用同一张表。
 //!
 //! 聊天记录缓存不在这里：它已经上收给框架（`arona::runtime::chatlog`），
 //! 配置项在 `config/arona.yml` 的 `chatlog` 段。
 
-use arona::config::arona::{PluginConfig, typed_section};
+use arona::config::arona::PluginConfig;
 use arona::config::plugin_config::ConfigEntry;
+use arona::framework::Framework;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -108,28 +114,28 @@ pub struct TrainerFileConfig {
 // 记账、还原与清理都在 `arona::runtime::chatlog`，插件只用不配。
 
 /// notify 配置项：框架按 (插件 id, 顶层键) 定位到本插件的配置文件
-fn notify_entry() -> ConfigEntry<NotifyConfig> {
-    ConfigEntry::new(crate::PLUGIN_ID, "notify")
+pub fn notify_entry(framework: &Framework) -> ConfigEntry<NotifyConfig> {
+    ConfigEntry::in_store(framework.configs(), crate::PLUGIN_ID, "notify")
 }
 
 /// trainer 配置项
-fn trainer_entry() -> ConfigEntry<TrainerConfig> {
-    ConfigEntry::new(crate::PLUGIN_ID, "trainer")
+pub fn trainer_entry(framework: &Framework) -> ConfigEntry<TrainerConfig> {
+    ConfigEntry::in_store(framework.configs(), crate::PLUGIN_ID, "trainer")
 }
 
 /// 读 notify 配置（缺失或格式错时回退默认值）
-pub fn notify() -> NotifyConfig {
-    notify_entry().get()
+pub fn notify(framework: &Framework) -> NotifyConfig {
+    notify_entry(framework).get()
 }
 
 /// 读 trainer 配置（缺失或格式错时回退默认值）
-pub fn trainer() -> TrainerConfig {
-    trainer_entry().get()
+pub fn trainer(framework: &Framework) -> TrainerConfig {
+    trainer_entry(framework).get()
 }
 
 /// 把修改后的 notify 配置写回 config/bluearchive/arona.yml（触发插件配置热重载）
-pub fn set_notify(config: &NotifyConfig) -> Result<(), String> {
-    notify_entry().set(config)
+pub fn set_notify(framework: &Framework, config: &NotifyConfig) -> Result<(), String> {
+    notify_entry(framework).set(config)
 }
 
 impl PluginConfig for NotifyConfig {
@@ -166,20 +172,10 @@ impl PluginConfig for TrainerConfig {
     }
 }
 
-/// install 阶段登记本插件的配置区：框架据此在 config/bluearchive/arona.yml 里
-/// 按这里的顺序生成带注释模板（键名撞车时框架保留先登记的那家）
-pub fn register_sections(framework: &arona::framework::Framework) {
-    framework
-        .sections()
-        .register(crate::PLUGIN_ID, typed_section::<NotifyConfig>("notify"));
-    framework
-        .sections()
-        .register(crate::PLUGIN_ID, typed_section::<TrainerConfig>("trainer"));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arona::config::arona::typed_section;
 
     /// 造一套**独立的框架实例**给用例用：配置区登记表、插件配置文件表都是它自己的，
     /// 再按 `plugin_id` 登记本插件的两块配置区。

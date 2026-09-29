@@ -4,10 +4,13 @@
 //! /config <配置名> <值> 修改配置并热重载
 //!
 //! groups/managers 由框架通用配置持有者读写；notify.* 属本插件自持有的配置区，
-//! 走 [`crate::config`] 的原样片段读写路径。
+//! 走 [`crate::config`] 的原样片段读写路径。两边都取**命令所属的那套框架实例**
+//! （`context.framework`）：`settings::*` 与 `ConfigEntry::new` 那批自由函数只转发到
+//! 进程默认实例，单测里造不出第二份。
 
 use crate::config::NotifyConfig;
 use arona::config::settings;
+use arona::framework::Framework;
 use arona::runtime::dispatcher::CommandContext;
 use arona::runtime::message::OutgoingMessage;
 use arona::runtime::value::{self, ConfigValue};
@@ -44,16 +47,18 @@ pub async fn handle(
     context: Arc<CommandContext>,
     arguments: Vec<String>,
 ) -> Option<OutgoingMessage> {
+    let framework = context.framework.clone();
     match arguments.len() {
-        0 => Some(view_all()),
-        1 => Some(view_one(&arguments[0])),
+        0 => Some(view_all(&framework)),
+        1 => Some(view_one(&framework, &arguments[0])),
         _ => {
             if is_list_mutation(&arguments) {
-                Some(mutate_list(&context, &arguments))
+                Some(mutate_list(&context, &arguments, &framework))
             } else {
                 let value = arguments[1..].join(" ");
                 let show_value = context.group_id.is_none();
                 Some(OutgoingMessage::text(update_field(
+                    &framework,
                     &arguments[0],
                     &value,
                     show_value,
@@ -68,12 +73,12 @@ fn notify_sub_key(key: &str) -> Option<&str> {
     key.strip_prefix("notify.")
 }
 
-fn update_field(key: &str, raw_value: &str, show_value: bool) -> String {
+fn update_field(framework: &Framework, key: &str, raw_value: &str, show_value: bool) -> String {
     if settings::find_field_index(key).is_some() {
-        return settings::update(key, raw_value, show_value);
+        return framework.settings().update(key, raw_value, show_value);
     }
     if let Some(sub) = notify_sub_key(key) {
-        let mut config = crate::config::notify();
+        let mut config = crate::config::notify(framework);
         let current = notify_value(&config, sub);
         let parsed = match value::parse(raw_value, &current) {
             Ok(v) => v,
@@ -82,7 +87,7 @@ fn update_field(key: &str, raw_value: &str, show_value: bool) -> String {
         if let Err(err) = notify_set(&mut config, sub, parsed) {
             return err;
         }
-        return match crate::config::set_notify(&config) {
+        return match crate::config::set_notify(framework, &config) {
             Ok(()) => {
                 let value_text = notify_value(&config, sub).display_kt();
                 if show_value {
@@ -111,7 +116,11 @@ fn is_list_mutation(arguments: &[String]) -> bool {
     )
 }
 
-fn mutate_list(context: &Arc<CommandContext>, arguments: &[String]) -> OutgoingMessage {
+fn mutate_list(
+    context: &Arc<CommandContext>,
+    arguments: &[String],
+    framework: &Framework,
+) -> OutgoingMessage {
     let is_add = arguments[1].eq_ignore_ascii_case("add");
     let key = arguments[0].clone();
     let value = if arguments.len() >= 3 {
@@ -130,17 +139,25 @@ fn mutate_list(context: &Arc<CommandContext>, arguments: &[String]) -> OutgoingM
     };
     let show_value = context.group_id.is_none();
     if key == "notify.black_groups" {
-        return OutgoingMessage::text(mutate_notify_black_groups(value, is_add, show_value));
+        return OutgoingMessage::text(mutate_notify_black_groups(
+            framework, value, is_add, show_value,
+        ));
     }
+    let settings = framework.settings();
     OutgoingMessage::text(if is_add {
-        settings::add_to_list(&key, value, show_value)
+        settings.add_to_list(&key, value, show_value)
     } else {
-        settings::remove_from_list(&key, value, show_value)
+        settings.remove_from_list(&key, value, show_value)
     })
 }
 
-fn mutate_notify_black_groups(value: i64, is_add: bool, show_value: bool) -> String {
-    let mut config = crate::config::notify();
+fn mutate_notify_black_groups(
+    framework: &Framework,
+    value: i64,
+    is_add: bool,
+    show_value: bool,
+) -> String {
+    let mut config = crate::config::notify(framework);
     if is_add {
         if config.black_groups.contains(&value) {
             return format!("notify.black_groups 已包含 {value}");
@@ -152,7 +169,7 @@ fn mutate_notify_black_groups(value: i64, is_add: bool, show_value: bool) -> Str
         }
         config.black_groups.retain(|v| *v != value);
     }
-    match crate::config::set_notify(&config) {
+    match crate::config::set_notify(framework, &config) {
         Ok(()) => {
             if show_value {
                 format!(
@@ -167,13 +184,13 @@ fn mutate_notify_black_groups(value: i64, is_add: bool, show_value: bool) -> Str
     }
 }
 
-fn view_all() -> OutgoingMessage {
-    let config = settings::config();
-    let notify = crate::config::notify();
+fn view_all(framework: &Framework) -> OutgoingMessage {
+    let config = framework.settings().config();
+    let notify = crate::config::notify(framework);
     let mut text = format!(
         "Arona 全部配置\n框架配置: {}\n插件配置: {}\n(修改保存后自动热重载)\n",
         arona::runtime::paths::arona_file().display(),
-        arona::config::plugin_config::config_file(crate::PLUGIN_ID).display(),
+        framework.configs().config_file(crate::PLUGIN_ID).display(),
     );
     text.push_str(USAGE);
     text.push('\n');
@@ -196,9 +213,9 @@ fn view_all() -> OutgoingMessage {
     OutgoingMessage::text(text)
 }
 
-fn view_one(key: &str) -> OutgoingMessage {
+fn view_one(framework: &Framework, key: &str) -> OutgoingMessage {
     if settings::find_field_index(key).is_some() {
-        let config = settings::config();
+        let config = framework.settings().config();
         let description = settings::FIELDS
             .iter()
             .find(|f| f.key == key)
@@ -212,7 +229,7 @@ fn view_one(key: &str) -> OutgoingMessage {
         return OutgoingMessage::text(field_line(key, value, description));
     }
     if let Some(entry) = notify_fields().iter().find(|(k, _)| *k == key) {
-        let notify = crate::config::notify();
+        let notify = crate::config::notify(framework);
         let sub = notify_sub_key(key).unwrap_or(key);
         return OutgoingMessage::text(field_line(
             key,

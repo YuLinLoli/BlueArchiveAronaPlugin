@@ -11,7 +11,7 @@ use crate::data::arona_backend::{self, FUZZY_IMAGE_RESULT, ImageRequestResult, I
 use crate::data::game_kee::{self, GachaCharacter, GachaServer};
 use crate::data::game_kee_guide::{self, GuideServer};
 use crate::db::dao;
-use arona::runtime::config as runtime_config;
+use arona::framework::Framework;
 use arona::runtime::dispatcher::CommandContext;
 use arona::runtime::message::{ForwardMessage, MessageSegment, OutgoingMessage};
 use once_cell::sync::OnceCell;
@@ -54,16 +54,16 @@ pub async fn trainer(
         return Some(OutgoingMessage::text(USAGE));
     }
     if let Some(server) = parse_server_pool_arg(&keyword) {
-        return Some(gacha_pool_forward(server).await);
+        return Some(gacha_pool_forward(&context.framework, server).await);
     }
     match keyword.as_str() {
         "日服活动" => return Some(fetch_activity_guide(GuideServer::JP).await),
         "国际服活动" => return Some(fetch_activity_guide(GuideServer::GLOBAL).await),
         "国服活动" => return Some(fetch_activity_guide(GuideServer::CN).await),
-        "日程笔记" => return Some(fetch_schedule_note().await),
+        "日程笔记" => return Some(fetch_schedule_note(&context.framework).await),
         _ => {}
     }
-    if let Some(over) = find_override(&keyword) {
+    if let Some(over) = find_override(&context.framework, &keyword) {
         let override_type = over.override_type.to_uppercase();
         match override_type.as_str() {
             "IMAGE" => {
@@ -127,7 +127,7 @@ fn selection_key(context: &CommandContext) -> String {
 }
 
 async fn handle_image_keyword(context: &CommandContext, keyword: &str) -> Option<OutgoingMessage> {
-    let trainer = trainer_config();
+    let trainer = trainer_config(&context.framework);
     let result = load_image_or_update(keyword).await;
     if let Some(file) = result.file {
         return Some(send_images(&[file], keyword));
@@ -271,9 +271,9 @@ async fn fetch_activity_guide(server: GuideServer) -> OutgoingMessage {
 }
 
 /// 日程笔记：合并转发（对应原版 forwardImages）
-async fn fetch_schedule_note() -> OutgoingMessage {
+async fn fetch_schedule_note(framework: &Framework) -> OutgoingMessage {
     match game_kee_guide::get_schedule_note_images().await {
-        Ok(files) => forward_images(&files, "日程笔记", runtime_config::bot_id()),
+        Ok(files) => forward_images(&files, "日程笔记", framework.gating().bot_id()),
         Err(err) => {
             arona::runtime::log::warning(format!("获取日程笔记攻略失败: {err}"));
             OutgoingMessage::text("获取日程笔记攻略失败，请稍后重试")
@@ -282,7 +282,7 @@ async fn fetch_schedule_note() -> OutgoingMessage {
 }
 
 /// 三服当期卡池：合并转发，每个角色一个节点（卡池图 + 角色名/所属/时间）
-async fn gacha_pool_forward(server: GachaServer) -> OutgoingMessage {
+async fn gacha_pool_forward(framework: &Framework, server: GachaServer) -> OutgoingMessage {
     let characters = match game_kee::fetch_pool(server).await {
         Ok(characters) => characters,
         Err(err) => {
@@ -308,7 +308,7 @@ async fn gacha_pool_forward(server: GachaServer) -> OutgoingMessage {
             }
         }))
         .await;
-    let uin = runtime_config::bot_id();
+    let uin = framework.gating().bot_id();
     let mut nodes: Vec<ForwardMessage> = Vec::new();
     for (character, image_file) in characters.iter().zip(images) {
         let mut content: Vec<MessageSegment> = Vec::new();
@@ -395,8 +395,8 @@ fn forward_images(files: &[PathBuf], title: &str, uin: i64) -> OutgoingMessage {
     OutgoingMessage::forward(title, nodes)
 }
 
-fn trainer_config() -> TrainerConfig {
-    crate::config::trainer()
+fn trainer_config(framework: &Framework) -> TrainerConfig {
+    crate::config::trainer(framework)
 }
 
 fn trainer_file_path() -> PathBuf {
@@ -426,9 +426,9 @@ fn load_trainer_file_overrides() -> Vec<TrainerOverride> {
 }
 
 /// 按原版顺序合并别名配置：文件配置优先，arona.yml 中同名的忽略
-fn find_override(keyword: &str) -> Option<TrainerOverride> {
+fn find_override(framework: &Framework, keyword: &str) -> Option<TrainerOverride> {
     let mut list = load_trainer_file_overrides();
-    for item in trainer_config().r#override.iter() {
+    for item in trainer_config(framework).r#override.iter() {
         if !list.iter().any(|existing| existing.name == item.name) {
             list.push(item.clone());
         }

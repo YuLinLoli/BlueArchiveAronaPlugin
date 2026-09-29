@@ -45,21 +45,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// `data/bluearchive/`），`disabled_plugins` 里也写它。改名等于换一份用户数据，别动。
 pub(crate) const PLUGIN_ID: &str = "bluearchive";
 
-/// 定时任务体里起异步活儿：走本插件的作用域，而不是裸 `tokio::spawn`。
-/// 那样框架才能在插件被停用时取消它，它的日志也才认得出是谁打的。
-/// `action` 是这一步在干什么（`定时推送`、`活动预警`…），日志前缀会细化成 `[插件名:动作]`。
-pub(crate) fn in_scope<F>(action: &str, task: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    match arona::plugin::scope_of(PLUGIN_ID) {
-        Some(scope) => {
-            scope.spawn_as(action, task);
-        }
-        None => arona::runtime::log::warning("本插件尚未装配，后台任务本次跳过"),
-    }
-}
-
 /// 本插件的数据目录（data/bluearchive：数据库与备份都在这）
 pub(crate) fn data_dir() -> PathBuf {
     arona::runtime::paths::plugin_data_dir(PLUGIN_ID)
@@ -108,18 +93,6 @@ fn migrate_legacy_dirs() {
 
 /// 碧蓝档案功能插件。
 pub struct BluearchivePlugin;
-
-impl BluearchivePlugin {
-    pub fn new() -> Self {
-        BluearchivePlugin
-    }
-}
-
-impl Default for BluearchivePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// 可被分群开关控制的功能清单（key 与 dispatcher::feature_for 对齐）。
 const FEATURES: [Feature; 10] = [
@@ -175,9 +148,6 @@ const FEATURES: [Feature; 10] = [
     },
 ];
 
-/// 每日活动推送任务名（与 activity::notify::enable_daily_job 保持一致）
-const DAILY_NOTIFY_JOB: &str = "ActivityNotify";
-
 /// 上一次生效的推送小时（-1 = 尚未初始化）：arona.yml 热重载后据此判断是否需要重建每日任务
 static LAST_NOTIFY_HOUR: AtomicI32 = AtomicI32::new(-1);
 
@@ -201,7 +171,8 @@ impl AronaPlugin for BluearchivePlugin {
         }
         // 登记本插件自持有的配置区（notify / trainer）：必须早于框架加载配置，
         // 否则 config/bluearchive/arona.yml 生成不出它们的带注释模板。
-        config::register_sections(reg.framework());
+        reg.config::<config::NotifyConfig>("notify");
+        reg.config::<config::TrainerConfig>("trainer");
         Ok(())
     }
 
@@ -217,8 +188,9 @@ impl AronaPlugin for BluearchivePlugin {
                 20,
                 "TestNotify",
                 Arc::new(move || {
-                    context.spawn_as("测试推送", async {
-                        activity::notify::push(false).await;
+                    let inner = context.clone();
+                    context.spawn_as("测试推送", async move {
+                        activity::notify::push(&inner, false).await;
                     });
                 }),
             );
@@ -249,20 +221,20 @@ impl AronaPlugin for BluearchivePlugin {
         // 每日活动推送（含启动 20 秒后的预警初始化）+ 每天 0 点的本地资源图片刷新
         activity::notify::enable_service(ctx);
         LAST_NOTIFY_HOUR.store(
-            config::notify().every_day_hour.clamp(0, 23),
+            config::notify(ctx.framework()).every_day_hour.clamp(0, 23),
             Ordering::SeqCst,
         );
-        commands::activity::enable_image_refresh_job();
+        commands::activity::enable_image_refresh_job(ctx);
         Ok(())
     }
 
-    fn on_config_reload(&self, _ctx: &PluginContext) {
+    fn on_config_reload(&self, ctx: &PluginContext) {
         // 框架在每次热重载/写入后都会回调这里；只有推送小时真的变了才重建每日任务。
-        let hour = config::notify().every_day_hour.clamp(0, 23);
+        let hour = config::notify(ctx.framework()).every_day_hour.clamp(0, 23);
         let previous = LAST_NOTIFY_HOUR.swap(hour, Ordering::SeqCst);
-        if previous != hour && arona::quartz::exists(DAILY_NOTIFY_JOB) {
-            arona::quartz::remove(DAILY_NOTIFY_JOB);
-            activity::notify::enable_daily_job(hour as u32);
+        if previous != hour && ctx.framework().jobs().exists(activity::notify::DAILY_JOB) {
+            ctx.remove_job(activity::notify::DAILY_JOB);
+            activity::notify::enable_daily_job(ctx, hour as u32);
             arona::runtime::log::info(format!("推送小时变更，重建每日任务: 每天 {hour} 点"));
         }
         // 聊天记录的保留期与清理间隔由框架按 arona.yml 的 chatlog 段自己校准
@@ -278,4 +250,5 @@ impl AronaPlugin for BluearchivePlugin {
 // 动态装载入口：导出 `arona_plugin_abi` / `arona_plugin_toolchain` / `arona_plugin_host`
 // / `arona_plugin_new` 四个 C 符号。框架扫描 plugins/ 时靠它们握手、核对工具链指纹、
 // 把宿主的进程级状态接过来，最后取出插件实例。插件作者要写的就这一行。
-arona::export_arona_plugin!(BluearchivePlugin::new());
+// 单位结构体直接写类型名，不必 `::default()`。
+arona::export_arona_plugin!(BluearchivePlugin);

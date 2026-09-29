@@ -7,10 +7,17 @@
 use crate::config::{self, NotifyConfig};
 use crate::data;
 use crate::entity::{Activity, ActivityType, ServerLocale};
-use arona::quartz;
+use arona::framework::Framework;
+use arona::plugin::PluginContext;
+use arona::quartz::JobFn;
 use arona::runtime::message::{MessageTarget, OutgoingMessage};
 use arona::services;
 use std::sync::Arc;
+
+/// 每日活动推送任务名（`on_config_reload` 换推送小时时要按它撤旧建新）
+pub(crate) const DAILY_JOB: &str = "ActivityNotify";
+/// 启动后的预警初始化任务名（延后 20 秒，只调度不推送）
+pub(crate) const INIT_JOB: &str = "ActivityNotifyInit";
 
 const NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS: i64 = 1;
 const DROP_ACTIVITY_NOTIFY_BEFORE_HOURS: i64 = 5;
@@ -20,38 +27,52 @@ const ALERT_IMMEDIATE_WINDOW_MILLIS: i64 = 10 * 60 * 1000;
 const IMAGE_REFRESH_AFTER_END_MILLIS: i64 = 5 * 60 * 1000;
 
 /// 启用每日推送：登记可开关的服务 + 建每日任务与启动初始化任务（start 阶段调用）
-pub fn enable_service(ctx: &arona::plugin::PluginContext) {
+pub fn enable_service(ctx: &PluginContext) {
     ctx.register_service(services::service_info(12, "活动推送", false, false));
-    let hour = config::notify().every_day_hour.clamp(0, 23) as u32;
-    enable_daily_job(hour);
+    let hour = config::notify(ctx.framework()).every_day_hour.clamp(0, 23) as u32;
+    enable_daily_job(ctx, hour);
     arona::runtime::log::info(format!("活动推送已启用, 每天 {hour} 点推送"));
 }
 
-/// 创建每天固定小时的活动推送任务（推送小时变更时由 `BluearchivePlugin::on_config_reload` 重建）。
-/// 任务组一律填本插件的 id：插件被停用时框架按组一次收干净，不必逐个记名字。
-pub fn enable_daily_job(hour: u32) {
-    quartz::create_daily(
-        hour,
-        "ActivityNotify",
-        crate::PLUGIN_ID,
-        Arc::new(|| {
-            crate::in_scope("定时推送", async move {
-                push(false).await;
+/// 创建每天固定小时的活动推送任务与启动 20 秒后的预警初始化任务
+/// （推送小时变更时由 `BluearchivePlugin::on_config_reload` 重建）。
+pub fn enable_daily_job(ctx: &PluginContext, hour: u32) {
+    // JobFn 是同步闭包：真要推送就得在这里把异步工作丢进本插件的任务作用域，
+    // 用 ctx.spawn_as 而不是 tokio::spawn，否则插件被停用时任务收不回去。
+    let scheduled = ctx.clone();
+    let notify: JobFn = {
+        let scoped = scheduled.clone();
+        Arc::new(move || {
+            // spawn_as 要借用 context，async 块又要把整份 ctx 搬进去：一份发起、一份搬走
+            let inner = scoped.clone();
+            scoped.spawn_as("定时推送", async move {
+                push(&inner, false).await;
             });
-        }),
-    );
-    // 启动后 20 秒执行一次初始化：只做预警调度，不推送日历
-    if !quartz::exists("ActivityNotifyInit") {
-        quartz::create_delay(
-            20,
-            "ActivityNotifyInit",
-            crate::PLUGIN_ID,
-            Arc::new(|| {
-                crate::in_scope("预警调度", async move {
-                    push(true).await;
-                });
-            }),
-        );
+        })
+    };
+    let init: JobFn = {
+        let scoped = scheduled;
+        Arc::new(move || {
+            let inner = scoped.clone();
+            scoped.spawn_as("预警调度", async move {
+                push(&inner, true).await;
+            });
+        })
+    };
+    schedule_jobs(ctx.framework(), hour, notify, init);
+}
+
+/// 两个任务的排期：每日任务同名替换，启动初始化任务已存在就不重建
+/// （`enable_daily_job` 会随每次配置热重载重跑一遍）。
+/// 任务组一律填本插件的 id：插件被停用时框架按组一次收干净，不必逐个记名字。
+fn schedule_jobs(framework: &Framework, hour: u32, notify: JobFn, init: JobFn) {
+    framework
+        .jobs()
+        .create_daily(hour, DAILY_JOB, crate::PLUGIN_ID, notify);
+    if !framework.jobs().exists(INIT_JOB) {
+        framework
+            .jobs()
+            .create_delay(20, INIT_JOB, crate::PLUGIN_ID, init);
     }
 }
 
@@ -65,21 +86,22 @@ fn resolve_targets(config: &NotifyConfig, global_groups: Vec<i64>) -> Vec<i64> {
 
 /// 每日推送与预警调度入口
 /// skip_image=true 表示启动时的初始化运行: 只做 5小时/1小时 预警调度, 不推送日历
-pub async fn push(skip_image: bool) {
-    let config = config::notify();
+pub async fn push(ctx: &PluginContext, skip_image: bool) {
+    let framework = ctx.framework();
+    let config = config::notify(framework);
     if !config.enable {
         return;
     }
-    if !arona::runtime::services::sender_ready() {
+    if !framework.runtime_services().sender_ready() {
         arona::runtime::log::warning("活动推送未执行: 消息发送器尚未就绪");
         return;
     }
-    let targets = resolve_targets(&config, arona::runtime::config::groups());
+    let targets = resolve_targets(&config, framework.gating().groups());
     if targets.is_empty() {
         arona::runtime::log::warning("活动推送未执行: 未配置推送目标群");
         return;
     }
-    schedule_alerts().await;
+    schedule_alerts(ctx).await;
     if skip_image {
         return;
     }
@@ -95,12 +117,12 @@ pub async fn push(skip_image: bool) {
     }
     for server in servers {
         let prefix = format!("{}({})", config.notify_text, server.server_name());
-        push_server(server, &prefix, &targets).await;
+        push_server(framework, server, &prefix, &targets).await;
     }
 }
 
 /// 向目标群推送某个服务器的活动日历（文本前缀 + 活动图片, 图片渲染失败时回退文本）
-async fn push_server(server: ServerLocale, prefix: &str, targets: &[i64]) {
+async fn push_server(framework: &Framework, server: ServerLocale, prefix: &str, targets: &[i64]) {
     let pair = match data::activity::fetch(server).await {
         Ok(pair) => pair,
         Err(err) => {
@@ -125,7 +147,9 @@ async fn push_server(server: ServerLocale, prefix: &str, targets: &[i64]) {
     for &group_id in targets {
         let receipt = arona::plugin::action_async(
             "发送消息",
-            arona::runtime::services::send_message(MessageTarget::Group(group_id), message.clone()),
+            framework
+                .runtime_services()
+                .send_message(MessageTarget::Group(group_id), message.clone()),
         )
         .await;
         if receipt.message_id.is_none() {
@@ -138,8 +162,8 @@ async fn push_server(server: ServerLocale, prefix: &str, targets: &[i64]) {
 }
 
 /// 查询并安排各服务器的活动结束预警
-async fn schedule_alerts() {
-    let config = config::notify();
+async fn schedule_alerts(ctx: &PluginContext) {
+    let config = config::notify(ctx.framework());
     let mut servers: Vec<ServerLocale> = Vec::new();
     if config.jp {
         servers.push(ServerLocale::JP);
@@ -162,7 +186,7 @@ async fn schedule_alerts() {
             }
         };
         for (activities, hours) in alert_plan(&pair.0) {
-            schedule_alert_group(&activities, server, hours).await;
+            schedule_alert_group(ctx, &activities, server, hours).await;
         }
     }
 }
@@ -192,13 +216,16 @@ fn alert_plan(active: &[Activity]) -> Vec<(Vec<Activity>, i64)> {
     ]
 }
 
-/// 按提醒时间分组处理: 正负10分钟内立即发送, 过时抛弃, 未来添加定时任务(去重)
-async fn schedule_alert_group(activities: &[Activity], locale: ServerLocale, before_hours: i64) {
-    if activities.is_empty() {
-        return;
-    }
-    let now = chrono::Utc::now().timestamp_millis();
-    let window = ALERT_IMMEDIATE_WINDOW_MILLIS;
+/// 一批活动的处置安排: 现在就发, 还是排到某个时刻
+#[derive(Debug)]
+enum AlertAction {
+    Now(Vec<Activity>),
+    At(i64, Vec<Activity>),
+}
+
+/// 纯计算（不碰框架，所以分组与窗口边界可以用表驱动用例逐个钉住）:
+/// 按「结束时刻 - 提前量」分组，正负 10 分钟内立即发送，已过时的丢掉，未来的留给排期。
+fn plan_alerts(activities: &[Activity], now_ms: i64, before_hours: i64) -> Vec<AlertAction> {
     let mut groups: std::collections::BTreeMap<i64, Vec<Activity>> =
         std::collections::BTreeMap::new();
     for activity in activities {
@@ -210,52 +237,107 @@ async fn schedule_alert_group(activities: &[Activity], locale: ServerLocale, bef
             .or_default()
             .push(activity.clone());
     }
-    for (notify_at, group) in groups {
-        if notify_at < now - window {
-            // 已过期, 抛弃
-        } else if notify_at <= now + window {
-            send_alert(&group, locale, before_hours).await;
-        } else {
-            insert_alert(&group, notify_at, locale, before_hours);
+    let window = ALERT_IMMEDIATE_WINDOW_MILLIS;
+    groups
+        .into_iter()
+        .filter_map(|(notify_at, group)| {
+            if notify_at < now_ms - window {
+                None
+            } else if notify_at <= now_ms + window {
+                Some(AlertAction::Now(group))
+            } else {
+                Some(AlertAction::At(notify_at, group))
+            }
+        })
+        .collect()
+}
+
+/// 按提醒时间分组处理: 窗口内立即发送, 过时抛弃, 未来添加定时任务(去重)
+async fn schedule_alert_group(
+    ctx: &PluginContext,
+    activities: &[Activity],
+    locale: ServerLocale,
+    before_hours: i64,
+) {
+    if activities.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    for action in plan_alerts(activities, now, before_hours) {
+        match action {
+            AlertAction::Now(group) => {
+                send_alert(ctx.framework(), &group, locale, before_hours).await
+            }
+            AlertAction::At(notify_at, group) => {
+                insert_alert(ctx, &group, notify_at, locale, before_hours)
+            }
         }
     }
     if before_hours == NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS {
-        // 1 小时预警同时安排「1 小时 5 分钟后」刷新本地资源图片
-        schedule_image_refresh(activities, locale);
+        // 1 小时预警同时安排「到期后 5 分钟」刷新本地资源图片
+        schedule_image_refresh(ctx, activities, locale);
     }
+}
+
+/// 预警任务的 key: 同一活动、同一提前量只会排出一个任务
+fn alert_key(locale: ServerLocale, expected_ms: i64, before_hours: i64) -> String {
+    format!(
+        "ActivityNotifyOneHour-{}-{expected_ms}-{before_hours}",
+        locale.command_name()
+    )
+}
+
+/// 图片刷新任务的 key
+fn image_refresh_key(locale: ServerLocale, expected_ms: i64) -> String {
+    format!(
+        "AronaActivityImageRefresh-{}-{expected_ms}",
+        locale.command_name()
+    )
 }
 
 /// 创建单次定时任务用于活动结束预警; 已存在同 key 任务则跳过, 避免重复
 fn insert_alert(
+    ctx: &PluginContext,
     activities: &[Activity],
     expected_ms: i64,
     locale: ServerLocale,
     before_hours: i64,
 ) {
-    let key = format!(
-        "ActivityNotifyOneHour-{}-{}-{before_hours}",
-        locale.command_name(),
-        expected_ms
-    );
-    if quartz::exists(&key) {
-        return;
-    }
     let group = activities.to_vec();
-    quartz::create_single_at(
+    let scheduled = ctx.clone();
+    insert_alert_job(
+        ctx.framework(),
         expected_ms,
-        &key,
-        crate::PLUGIN_ID,
+        locale,
+        before_hours,
         Arc::new(move || {
             let activities = group.clone();
-            crate::in_scope("活动预警", async move {
-                send_alert(&activities, locale, before_hours).await;
+            let inner = scheduled.clone();
+            scheduled.spawn_as("活动预警", async move {
+                send_alert(inner.framework(), &activities, locale, before_hours).await;
             });
         }),
     );
 }
 
+/// 排期那一层（收 `&Framework`，任务体由调用方给）：重复调度时同 key 直接跳过
+fn insert_alert_job(
+    framework: &Framework,
+    expected_ms: i64,
+    locale: ServerLocale,
+    before_hours: i64,
+    body: JobFn,
+) {
+    let key = alert_key(locale, expected_ms, before_hours);
+    let jobs = framework.jobs();
+    if jobs.exists(&key) {
+        return;
+    }
+    jobs.create_single_at(expected_ms, &key, crate::PLUGIN_ID, body);
+}
+
 /// 活动到期后 5 分钟刷新本地资源图片: 对每个尚未到期的结束时刻各安排一个单次任务
-fn schedule_image_refresh(activities: &[Activity], locale: ServerLocale) {
+fn schedule_image_refresh(ctx: &PluginContext, activities: &[Activity], locale: ServerLocale) {
     let now = chrono::Utc::now().timestamp_millis();
     let mut refresh_times: Vec<i64> = Vec::new();
     for activity in activities {
@@ -268,38 +350,52 @@ fn schedule_image_refresh(activities: &[Activity], locale: ServerLocale) {
         }
     }
     for refresh_at in refresh_times {
-        insert_image_refresh(refresh_at, locale);
+        insert_image_refresh(ctx, refresh_at, locale);
     }
 }
 
 /// 创建单次定时任务用于刷新本地资源图片; 已存在同 key 任务则跳过, 避免重复
-fn insert_image_refresh(expected_ms: i64, locale: ServerLocale) {
-    let key = format!(
-        "AronaActivityImageRefresh-{}-{expected_ms}",
-        locale.command_name()
-    );
-    if quartz::exists(&key) {
-        return;
-    }
-    quartz::create_single_at(
+fn insert_image_refresh(ctx: &PluginContext, expected_ms: i64, locale: ServerLocale) {
+    let scheduled = ctx.clone();
+    insert_image_refresh_job(
+        ctx.framework(),
         expected_ms,
-        &key,
-        crate::PLUGIN_ID,
+        locale,
         Arc::new(move || {
-            crate::in_scope("刷新活动图", async move {
+            scheduled.spawn_as("刷新活动图", async move {
                 crate::commands::activity::refresh_image(locale).await;
             });
         }),
     );
 }
 
-/// 发送活动结束预警(定时任务与立即发送共用)
-async fn send_alert(activity: &[Activity], locale: ServerLocale, before_hours: i64) {
-    if !arona::runtime::services::sender_ready() {
+/// 排期那一层（收 `&Framework`，任务体由调用方给）：重复调度时同 key 直接跳过
+fn insert_image_refresh_job(
+    framework: &Framework,
+    expected_ms: i64,
+    locale: ServerLocale,
+    body: JobFn,
+) {
+    let key = image_refresh_key(locale, expected_ms);
+    let jobs = framework.jobs();
+    if jobs.exists(&key) {
         return;
     }
-    let config = config::notify();
-    let targets = resolve_targets(&config, arona::runtime::config::groups());
+    jobs.create_single_at(expected_ms, &key, crate::PLUGIN_ID, body);
+}
+
+/// 发送活动结束预警(定时任务与立即发送共用)
+async fn send_alert(
+    framework: &Framework,
+    activity: &[Activity],
+    locale: ServerLocale,
+    before_hours: i64,
+) {
+    if !framework.runtime_services().sender_ready() {
+        return;
+    }
+    let config = config::notify(framework);
+    let targets = resolve_targets(&config, framework.gating().groups());
     if targets.is_empty() {
         return;
     }
@@ -337,10 +433,9 @@ async fn send_alert(activity: &[Activity], locale: ServerLocale, before_hours: i
         for &group_id in &targets {
             let receipt = arona::plugin::action_async(
                 "发送消息",
-                arona::runtime::services::send_message(
-                    MessageTarget::Group(group_id),
-                    message.clone(),
-                ),
+                framework
+                    .runtime_services()
+                    .send_message(MessageTarget::Group(group_id), message.clone()),
             )
             .await;
             if receipt.message_id.is_none() {
@@ -357,6 +452,7 @@ fn is_maintenance(activity: &Activity) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arona::config::arona::typed_section;
     use arona::runtime::message::{
         BoxFuture, MessageReceipt, MessageSegment, MessageSender, MessageTarget,
     };
@@ -364,13 +460,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// 下面两条端到端用例驱动的是**进程默认框架实例**：消息发送器、定时任务、
-    /// `config/arona.yml` 持有者都挂在它身上（插件的运行期代码就是走这套全局入口），
-    /// 并行会互相顶掉，所以串行。
-    /// 契约面那层状态（配置区登记表、插件配置文件表、命令表、钩子表、服务表、停用名单）
-    /// 已经拆成可持有的实例，相关用例各自 `Framework::new()`，不再受这把锁约束。
-    static GLOBAL_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
+    /// 捕获用的假发送器：记下每条本该发出去的消息，不碰网络
     struct CaptureSender {
         sent: Mutex<Vec<(MessageTarget, OutgoingMessage)>>,
     }
@@ -423,16 +513,29 @@ mod tests {
         }
     }
 
-    fn write_test_config() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("arona-notify-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("arona.yml");
-        std::fs::write(&path, "groups: [910001, 910002]\nmanagers: []\n").unwrap();
-        // notify 是本插件自持有的配置区，住在 config/bluearchive/arona.yml，不在框架那份里
-        let plugin_file = arona::config::plugin_config::config_file(crate::PLUGIN_ID);
-        std::fs::create_dir_all(plugin_file.parent().expect("插件配置目录")).unwrap();
+    /// 任务体占位：这些用例验的是分组、排期与发送，不验任务体真去干什么
+    fn no_op() -> JobFn {
+        Arc::new(|| {})
+    }
+
+    /// 造一套**独立的框架实例**给用例用：配置区登记表、插件配置文件、允许群名单、
+    /// 消息发送器全挂在它身上，不碰进程默认实例——所以用例之间真并行，不必抢串行锁。
+    ///
+    /// `install` 阶段由插件自己登记配置区，这里替它登记：不登记的话 `notify` 段会被
+    /// 当成未知键丢掉。配置文件落在 `config/bluearchive/arona.yml`（仓库里已 gitignore）。
+    fn isolated() -> (Arc<Framework>, Arc<CaptureSender>) {
+        let framework = arona::framework::Framework::new();
+        framework
+            .sections()
+            .register(crate::PLUGIN_ID, typed_section::<NotifyConfig>("notify"));
+        framework.sections().register(
+            crate::PLUGIN_ID,
+            typed_section::<crate::config::TrainerConfig>("trainer"),
+        );
+        let file = framework.configs().config_file(crate::PLUGIN_ID);
+        std::fs::create_dir_all(file.parent().expect("插件配置目录")).unwrap();
         std::fs::write(
-            &plugin_file,
+            &file,
             "notify:\n\
              \x20 enable: true\n\
              \x20 every_day_hour: 8\n\
@@ -443,23 +546,18 @@ mod tests {
              \x20 notify_text: \"碧蓝档案预警\"\n",
         )
         .unwrap();
-        path
+        framework.configs().init();
+        framework.gating().set_groups(vec![910001, 910002]);
+        let sender = Arc::new(CaptureSender::new());
+        framework
+            .runtime_services()
+            .set_message_sender(sender.clone());
+        (framework, sender)
     }
 
-    /// 同时校验：预警分组(5小时/1小时/维护/生日)、黑名单、即时发送、未来定时、过期抛弃、任务去重、每日任务时刻
-    #[tokio::test]
-    async fn notify_logic_plan_and_alerts() {
-        // 这条用例跑的是默认框架实例的整条链路（配置文件 → 停用名单 → 发送器 → 定时任务）
-        let _serial = GLOBAL_RUNTIME_LOCK.lock().await;
-        // 运行期由插件 install() 登记配置区；测试里直接 init()，需自行登记，
-        // 否则 notify 段会被当成未知键丢弃
-        config::register_sections(arona::framework::Framework::global());
-        arona::runtime::config::set_bot_id(10000);
-        arona::config::settings::init(write_test_config()).expect("测试配置应能加载");
-        arona::config::plugin_config::init();
-        let sender = Arc::new(CaptureSender::new());
-        arona::runtime::services::set_message_sender(sender.clone());
-
+    /// 预警分组: 除生日外的活动各排 5 小时与 1 小时两档, 维护单列只走 1 小时
+    #[test]
+    fn alert_plan_splits_normal_drop_and_maintenance() {
         let now = chrono::Utc::now().timestamp_millis();
         let normal = activity(ActivityType::Activity, now + 2 * 3_600_000, "普通活动");
         let drop = activity(ActivityType::PickUp, now + 6 * 3_600_000, "双倍掉落活动");
@@ -487,14 +585,87 @@ mod tests {
         assert_eq!(plan[2].1, NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS);
         assert_eq!(plan[2].0.len(), 1);
         assert_eq!(plan[2].0[0].content, "维护预告");
+    }
 
-        // 黑名单：910002 被排除
-        let targets = resolve_targets(&config::notify(), vec![910001, 910002]);
-        assert_eq!(targets, vec![910001]);
-
-        // 立即发送（1 小时组：1 分钟后到点，落在正负 10 分钟窗口内）
+    /// 处置判定: 正负 10 分钟内立即发送, 未来排期, 已过时的丢掉; 同一时刻的一起发
+    #[test]
+    fn plan_alerts_classifies_now_later_and_expired() {
+        let now = chrono::Utc::now().timestamp_millis();
+        // 结束前 1 小时正好是 10 分钟后 -> 落在窗口内，立即发
         let soon = activity(ActivityType::Activity, now + 3_600_000 + 60_000, "即将结束");
-        schedule_alert_group(
+        // 同一结束时刻的第二条: 与上一条并成一组，不必各发一条
+        let same = activity(
+            ActivityType::PickUp,
+            now + 3_600_000 + 60_000,
+            "同时结束的双倍",
+        );
+        // 100 小时后结束 -> 排期
+        let far = activity(
+            ActivityType::Activity,
+            now + 100 * 3_600_000,
+            "很久以后的活动",
+        );
+        // 早已结束 -> 抛弃
+        let expired = activity(
+            ActivityType::Activity,
+            now - 10 * 3_600_000,
+            "早就结束的活动",
+        );
+        // 生日与没有结束时刻的活动都不该出现在结果里
+        let birthday = activity(ActivityType::Birthday, now + 3_600_000 + 60_000, "角色生日");
+        let timeless = activity(ActivityType::Activity, 0, "没有结束时刻");
+
+        let plan = plan_alerts(
+            &[soon, same, far.clone(), expired, birthday, timeless],
+            now,
+            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
+        );
+        assert_eq!(
+            plan.len(),
+            2,
+            "过期/生日/无结束时刻都不该留下安排: {plan:?}"
+        );
+        let now_group = plan
+            .iter()
+            .find_map(|action| match action {
+                AlertAction::Now(group) => Some(group.clone()),
+                _ => None,
+            })
+            .expect("窗口内的活动没有判成立即发送");
+        assert_eq!(now_group.len(), 2, "同一时刻的活动应并成一组");
+        let at = plan
+            .iter()
+            .find_map(|action| match action {
+                AlertAction::At(at, group) => Some((*at, group.len())),
+                _ => None,
+            })
+            .expect("未来的活动没有判成排期");
+        assert_eq!(at.0, far.end_time - 3_600_000, "排期时刻应为结束前 1 小时");
+        assert_eq!(at.1, 1);
+    }
+
+    /// 推送目标: 全局允许名单去掉黑名单
+    #[test]
+    fn targets_drop_blacklisted_groups() {
+        let (framework, _sender) = isolated();
+        let config = config::notify(&framework);
+        assert_eq!(
+            resolve_targets(&config, framework.gating().groups()),
+            vec![910001],
+            "910002 在黑名单里，应当被排除"
+        );
+    }
+
+    /// 发送侧: 三种文案与目标群（含黑名单、维护单列）
+    #[tokio::test]
+    async fn alert_texts_go_to_allowed_groups() {
+        let (framework, sender) = isolated();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        // 普通活动：带推送前缀文案与「将会在 N 小时后结束」
+        let soon = activity(ActivityType::Activity, now + 3_600_000 + 60_000, "即将结束");
+        send_alert(
+            &framework,
             &[soon],
             ServerLocale::JP,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
@@ -503,10 +674,10 @@ mod tests {
         let sent = sender.take();
         let texts: Vec<String> = sent.iter().map(|(_, m)| message_text(m)).collect();
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("即将结束") && t.contains("将会在1小时后结束")),
-            "1 小时预警未发送: {texts:?}"
+            texts.iter().any(|t| t.contains("碧蓝档案预警(日服)")
+                && t.contains("即将结束")
+                && t.contains("将会在1小时后结束")),
+            "1 小时预警文案异常: {texts:?}"
         );
         assert!(
             sent.iter()
@@ -514,13 +685,14 @@ mod tests {
             "预警发送到了黑名单群: {sent:?}"
         );
 
-        // 立即发送（5 小时组：双倍掉落）
+        // 双倍掉落：提前 5 小时那一档
         let drop_soon = activity(
             ActivityType::PickUp,
             now + 5 * 3_600_000 + 60_000,
             "双倍掉落即将结束",
         );
-        schedule_alert_group(
+        send_alert(
+            &framework,
             &[drop_soon],
             ServerLocale::JP,
             DROP_ACTIVITY_NOTIFY_BEFORE_HOURS,
@@ -531,16 +703,17 @@ mod tests {
             texts
                 .iter()
                 .any(|t| t.contains("双倍掉落即将结束") && t.contains("将会在5小时后结束")),
-            "5 小时预警未发送: {texts:?}"
+            "5 小时预警文案异常: {texts:?}"
         );
 
-        // 维护活动：特殊文案
+        // 维护：单列文案，不带活动清单
         let maintenance_soon = activity(
             ActivityType::Maintenance,
             now + 3_600_000 + 60_000,
             "维护安排",
         );
-        schedule_alert_group(
+        send_alert(
+            &framework,
             &[maintenance_soon],
             ServerLocale::CN,
             NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
@@ -551,90 +724,79 @@ mod tests {
             texts.iter().any(|t| t == "距离国服维护还有1小时"),
             "维护预警文案异常: {texts:?}"
         );
+    }
 
-        // 未来活动 -> 建定时任务；同一活动重复调度 -> 去重
+    /// 排期侧: 预警任务与图片刷新任务各自去重，触发时刻分别落在结束前 1 小时与结束后 5 分钟；
+    /// 每日推送整点触发，启动初始化任务不重建
+    #[tokio::test]
+    async fn jobs_dedup_and_fire_at_planned_time() {
+        let (framework, _sender) = isolated();
+        let jobs = framework.jobs();
+        let now = chrono::Utc::now().timestamp_millis();
         let far = activity(
             ActivityType::Activity,
             now + 100 * 3_600_000,
             "很久以后的活动",
         );
-        schedule_alert_group(
-            std::slice::from_ref(&far),
-            ServerLocale::JP,
-            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
-        )
-        .await;
-        schedule_alert_group(
-            std::slice::from_ref(&far),
-            ServerLocale::JP,
-            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
-        )
-        .await;
-        let key = format!(
-            "ActivityNotifyOneHour-{}-{}-{}",
-            ServerLocale::JP.command_name(),
-            far.end_time - NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS * 3_600_000,
-            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS
-        );
-        assert!(arona::quartz::exists(&key), "未来活动未创建预警定时任务");
-        let count = arona::quartz::list()
-            .iter()
-            .filter(|task| task.name == key)
-            .count();
-        assert_eq!(count, 1, "预警定时任务未去重");
+        let notify_at = far.end_time - NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS * 3_600_000;
+        let refresh_at = far.end_time + IMAGE_REFRESH_AFTER_END_MILLIS;
 
-        // 1 小时预警同时安排「到期后 5 分钟」的本地资源图片刷新任务(1小时 + 5分钟)
-        let refresh_key = format!(
-            "AronaActivityImageRefresh-{}-{}",
-            ServerLocale::JP.command_name(),
-            far.end_time + IMAGE_REFRESH_AFTER_END_MILLIS
+        // 同一活动重复调度两次: 两个任务都只留一个
+        for _ in 0..2 {
+            insert_alert_job(
+                &framework,
+                notify_at,
+                ServerLocale::JP,
+                NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
+                no_op(),
+            );
+            insert_image_refresh_job(&framework, refresh_at, ServerLocale::JP, no_op());
+        }
+        let alert_key = alert_key(
+            ServerLocale::JP,
+            notify_at,
+            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
         );
-        assert!(
-            arona::quartz::exists(&refresh_key),
-            "活动到期后未安排本地资源图片刷新任务"
-        );
-        let refresh_count = arona::quartz::list()
-            .iter()
-            .filter(|task| task.name == refresh_key)
-            .count();
-        assert_eq!(refresh_count, 1, "本地资源图片刷新任务未去重");
+        let refresh_key = image_refresh_key(ServerLocale::JP, refresh_at);
         // 单次任务的下次触发时间由任务协程写入, 稍等片刻再读取
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let refresh = arona::quartz::list()
+        let listed = jobs.list();
+        assert_eq!(
+            listed.iter().filter(|task| task.name == alert_key).count(),
+            1,
+            "预警定时任务未去重"
+        );
+        assert!(
+            listed.iter().any(|task| task.name == refresh_key),
+            "活动到期后未安排本地资源图片刷新任务"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|task| task.name == refresh_key)
+                .count(),
+            1,
+            "本地资源图片刷新任务未去重"
+        );
+        let refresh = listed
             .into_iter()
             .find(|task| task.name == refresh_key)
             .expect("未找到本地资源图片刷新任务");
         assert_eq!(
             refresh.next_fire_ms,
-            Some(far.end_time + IMAGE_REFRESH_AFTER_END_MILLIS),
+            Some(refresh_at),
             "本地资源图片刷新时间应为活动到期后 5 分钟"
         );
-        arona::quartz::remove(&refresh_key);
 
-        // 已过期活动 -> 抛弃，不发送也不建任务
-        let expired = activity(
-            ActivityType::Activity,
-            now - 10 * 3_600_000,
-            "早就结束的活动",
-        );
-        schedule_alert_group(
-            &[expired],
-            ServerLocale::JP,
-            NORMAL_ACTIVITY_NOTIFY_BEFORE_HOURS,
-        )
-        .await;
-        assert!(sender.take().is_empty(), "过期活动不应发送预警");
-
-        // 每日推送任务：注册在配置的小时，且下次触发为整点
-        enable_daily_job(8);
-        assert!(
-            arona::quartz::exists("ActivityNotify"),
-            "每日推送任务未注册"
-        );
+        // 每日推送 + 启动初始化：重复启用只重建每日任务，初始化任务保持原样
+        schedule_jobs(&framework, 8, no_op(), no_op());
+        schedule_jobs(&framework, 8, no_op(), no_op());
+        assert!(jobs.exists(DAILY_JOB), "每日推送任务未注册");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let info = arona::quartz::list()
+        let info = jobs
+            .list()
             .into_iter()
-            .find(|task| task.name == "ActivityNotify")
+            .find(|task| task.name == DAILY_JOB)
             .expect("未找到每日推送任务");
         let next = info.next_fire_ms.expect("每日推送任务没有下次触发时间");
         let fire_at = chrono::DateTime::from_timestamp_millis(next)
@@ -643,24 +805,40 @@ mod tests {
         assert_eq!(fire_at.hour(), 8, "每日推送小时不符: {fire_at}");
         assert_eq!(fire_at.minute(), 0);
         assert_eq!(fire_at.second(), 0);
+        assert_eq!(
+            jobs.list()
+                .iter()
+                .filter(|task| task.name == INIT_JOB)
+                .count(),
+            1,
+            "启动初始化任务被重复创建"
+        );
         println!("[每日推送] 下次触发: {fire_at}");
-
-        arona::quartz::remove("ActivityNotify");
-        arona::quartz::remove("ActivityNotifyInit");
     }
 
-    /// 端到端：真正执行一次每日推送（联网拉 GameKee 活动 + 渲染日历图）
+    /// 端到端：真正执行一次每日推送（联网拉 GameKee 活动 + 渲染日历图 + 发到允许群）。
+    /// 推送编排那一层要 `PluginContext`（框架的构造函数是 `pub(crate)`，插件侧造不出来），
+    /// 所以这里直接驱动它底下真正发消息的那一步：目标群取实例上的允许名单去掉黑名单。
     #[ignore = "联网自检, 运行: cargo test notify_daily -- --ignored --nocapture --test-threads=1"]
     #[tokio::test]
     async fn notify_daily_push_network() {
-        let _serial = GLOBAL_RUNTIME_LOCK.lock().await;
-        config::register_sections(arona::framework::Framework::global());
-        arona::runtime::config::set_bot_id(10000);
-        arona::config::settings::init(write_test_config()).expect("测试配置应能加载");
-        let sender = Arc::new(CaptureSender::new());
-        arona::runtime::services::set_message_sender(sender.clone());
-
-        push(false).await;
+        let (framework, sender) = isolated();
+        let config = config::notify(&framework);
+        let targets = resolve_targets(&config, framework.gating().groups());
+        let mut servers: Vec<ServerLocale> = Vec::new();
+        if config.jp {
+            servers.push(ServerLocale::JP);
+        }
+        if config.global {
+            servers.push(ServerLocale::GLOBAL);
+        }
+        if config.cn {
+            servers.push(ServerLocale::CN);
+        }
+        for server in servers {
+            let prefix = format!("{}({})", config.notify_text, server.server_name());
+            push_server(&framework, server, &prefix, &targets).await;
+        }
 
         let sent = sender.take();
         println!("[每日推送] 共发送 {} 条", sent.len());

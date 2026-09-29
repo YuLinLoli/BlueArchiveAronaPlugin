@@ -31,22 +31,26 @@ impl MessageSender for CaptureSender {
 #[ignore = "端到端自检(需联网), 运行: cargo test ten_pull -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn ten_pull_outputs_image_into_plugin_dir() {
-    // 运行期依赖：数据目录 / 数据库 / 机器人配置
+    // 运行期依赖：数据目录 / 机器人配置都挂在这一套隔离实例上，不覆写进程默认实例
     let image_root = crate::image_dir();
-    arona::runtime::services::set_data_root(arona::runtime::paths::data_root());
-    arona::runtime::config::set_bot_id(10000);
-    arona::runtime::config::set_end_with_sensei("老师".to_string());
+    let framework = arona::framework::Framework::new();
+    framework
+        .runtime_services()
+        .set_data_root(arona::runtime::paths::data_root());
+    framework.gating().set_bot_id(10000);
+    framework.gating().set_end_with_sensei("老师".to_string());
     assert!(crate::db::start(), "数据库初始化失败");
 
-    // 命令登记（registrations 内部会注册全部服务），再由框架的命令表按名分发
+    // 命令登记（registrations 内部会注册全部服务），再由这套实例自己的命令表按名分发
     let config = arona::config::onebot::OneBotConfig {
         self_id: 10000,
         nickname: "Arona".to_string(),
         send_image_as_file: false,
         connections: std::collections::BTreeMap::new(),
     };
-    crate::dispatcher::register_into_table(config);
-    let dispatcher = Arc::new(arona::runtime::dispatcher::CommandDispatcher::new());
+    crate::dispatcher::register_into(&framework, config);
+    let dispatcher =
+        Arc::new(arona::runtime::dispatcher::CommandDispatcher::with_framework(&framework));
 
     let sender = Arc::new(CaptureSender {
         sent: Mutex::new(Vec::new()),
@@ -63,9 +67,7 @@ async fn ten_pull_outputs_image_into_plugin_dir() {
         quoted: None,
         segments: Vec::new(),
         sender: sender.clone(),
-        // 上下文末尾那个实例字段是 dll 会按编译期偏移读的跨镜像布局，
-        // 这里挂一套隔离实例即可（用例只看 sender 记下来的消息）
-        framework: arona::framework::Framework::new(),
+        framework: framework.clone(),
     });
 
     let handled = dispatcher.dispatch(context).await;
