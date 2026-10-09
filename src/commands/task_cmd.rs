@@ -45,6 +45,10 @@ fn trigger(framework: &Framework, name: Option<&str>) -> OutgoingMessage {
         return OutgoingMessage::text("用法: /任务 触发 <任务名>");
     };
     let name = name.trim();
+    // 手动触发当天推送前先让出「今天已推过」的名额，否则会被入口那道去重挡下
+    if name == crate::activity::notify::DAILY_JOB {
+        crate::activity::notify::allow_manual_repush();
+    }
     match framework.jobs().trigger(name) {
         Ok(()) => OutgoingMessage::text(format!("已触发任务: {name}")),
         Err(err) => OutgoingMessage::text(err),

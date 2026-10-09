@@ -13,9 +13,17 @@ use arona::quartz::JobFn;
 use arona::runtime::message::{MessageTarget, OutgoingMessage};
 use arona::services;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// 每日活动推送任务名（`on_config_reload` 换推送小时时要按它撤旧建新）
 pub(crate) const DAILY_JOB: &str = "ActivityNotify";
+/// 最近一次「每日日历推送」归属的本地日期键（yyyymmdd）。
+///
+/// 框架的 Daily 任务一次触发只回调一次，可插件这一层没有「今天就推过」的记忆：启动 20 秒
+/// 后的测试推送（`--test-notify`）与配置的定时任务撞在一起、定时任务被按名替换重建、系统
+/// 时钟回拨让整点又走一遍，都会把同一份日历再发一次。这里记下当天日期，同一天的第二次
+/// 触发直接被吃掉——「每日推送」本来就该一天只出一份。
+static LAST_DAILY_PUSH_DAY: AtomicI64 = AtomicI64::new(0);
 /// 启动后的预警初始化任务名（延后 20 秒，只调度不推送）
 pub(crate) const INIT_JOB: &str = "ActivityNotifyInit";
 
@@ -76,11 +84,35 @@ fn schedule_jobs(framework: &Framework, hour: u32, notify: JobFn, init: JobFn) {
     }
 }
 
-/// 推送目标群：全局允许的群去掉黑名单
+/// 本地日期编码成「今天」的键（yyyymmdd）：同一天算同一个槽位
+fn daily_push_day(now: chrono::DateTime<chrono::Local>) -> i64 {
+    now.format("%Y%m%d").to_string().parse().unwrap_or(0)
+}
+
+/// 认领当天的日历推送名额：把旧值换成今天的那一次才算抢到。
+/// 一发原子的 swap，重复触发（哪怕并发）只有一个能拿到 true。
+fn claim_daily_push_day(state: &AtomicI64, day: i64) -> bool {
+    state.swap(day, Ordering::SeqCst) != day
+}
+
+/// 让出当天的名额（清回「未推」）
+fn release_daily_push_day(state: &AtomicI64) {
+    state.store(0, Ordering::SeqCst);
+}
+
+/// 手动重推入口：`/任务 触发` 当天推送前先让出名额，免得被入口那道去重挡下
+pub(crate) fn allow_manual_repush() {
+    release_daily_push_day(&LAST_DAILY_PUSH_DAY);
+}
+
+/// 推送目标群：全局允许的群去掉黑名单，并去重
+/// （配置里同一个群出现两次时，不该把同一条日历往那个群发两遍）
 fn resolve_targets(config: &NotifyConfig, global_groups: Vec<i64>) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
     global_groups
         .into_iter()
         .filter(|group| !config.black_groups.contains(group))
+        .filter(|group| seen.insert(*group))
         .collect()
 }
 
@@ -103,6 +135,14 @@ pub async fn push(ctx: &PluginContext, skip_image: bool) {
     }
     schedule_alerts(ctx).await;
     if skip_image {
+        return;
+    }
+    // 日历一天只推一次：定时任务被重复触发/重建、系统时钟回拨让整点又走一遍、启动 20 秒
+    // 后的测试推送与定时任务撞在一起，第二条都在这里被吃掉，免得群里出现两份日历。
+    // 认领放在 skip_image 之后——启动初始化那一趟只调度预警、不发日历，不该占当天的名额。
+    let day = daily_push_day(chrono::Local::now());
+    if !claim_daily_push_day(&LAST_DAILY_PUSH_DAY, day) {
+        arona::runtime::log::info("今日活动日历已推送过, 跳过本次重复触发");
         return;
     }
     let mut servers: Vec<ServerLocale> = Vec::new();
@@ -516,6 +556,46 @@ mod tests {
     /// 任务体占位：这些用例验的是分组、排期与发送，不验任务体真去干什么
     fn no_op() -> JobFn {
         Arc::new(|| {})
+    }
+
+    /// 每日推送名额：同一天只放行一次，换一天才重新放行
+    #[test]
+    fn daily_push_day_is_claimed_once_per_day() {
+        let state = AtomicI64::new(0);
+        assert!(claim_daily_push_day(&state, 20261009), "当天首触发应放行");
+        assert!(
+            !claim_daily_push_day(&state, 20261009),
+            "同一天第二次触发应被吃掉"
+        );
+        assert!(claim_daily_push_day(&state, 20261010), "换一天应重新放行");
+        assert!(!claim_daily_push_day(&state, 20261010));
+    }
+
+    /// 当天名额可以主动让出：手动重推（/任务 触发）靠的就是这一下
+    #[test]
+    fn released_day_can_be_claimed_again() {
+        let state = AtomicI64::new(0);
+        assert!(claim_daily_push_day(&state, 20261009));
+        assert!(!claim_daily_push_day(&state, 20261009));
+        release_daily_push_day(&state);
+        assert!(
+            claim_daily_push_day(&state, 20261009),
+            "让出名额后当天应能再推一次"
+        );
+    }
+
+    /// 目标群去重：同一个群在名单里出现两次也只发一遍，黑名单照旧剔除
+    #[test]
+    fn targets_are_deduplicated_and_blacklisted() {
+        let config = NotifyConfig {
+            black_groups: vec![3],
+            ..NotifyConfig::default()
+        };
+        assert_eq!(
+            resolve_targets(&config, vec![1, 2, 2, 3, 4, 1]),
+            vec![1, 2, 4],
+            "重复目标应去重、黑名单应剔除、次序保持"
+        );
     }
 
     /// 造一套**独立的框架实例**给用例用：配置区登记表、插件配置文件、允许群名单、

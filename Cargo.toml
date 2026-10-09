@@ -1,6 +1,6 @@
 [package]
 name = "bluearchive-plugin"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/YuLinLoli/BlueArchiveAronaPlugin"
@@ -21,8 +21,9 @@ crate-type = ["cdylib", "rlib"]
 # Arona 框架：按 git 标签依赖，与本仓库发布说明里写的宿主版本一一对应。
 # 只有在改框架本体、要立刻编译验证时才临时切回相邻目录的 path 依赖，改完切回来：
 #   arona = { package = "arona-rs", git = "https://github.com/YuLinLoli/Arona-rs", tag = "v1.1.0", default-features = false }
-# 当前停在 path：v1.1.0 这个标签还只在本地没推出去，而符号布局 5 那批接口（Bot/Group/Member 对象模型、
-# 聊天记录库走宿主侧 trait 出口、Image 句柄）都不在已推送的 v1.0.0 里。
+# 当前停在 path：接口需求已经跨过了已发布的标签——符号布局 5 那批（Bot/Group/Member 对象模型、
+# 聊天记录库走宿主侧 trait 出口、Image 句柄）不在已推送的 v1.0.0 里，符号布局 6 起定时任务改走
+# 宿主通道（framework.jobs()），本地 v1.1.0 标签（布局 5）也还没有，而框架 HEAD 已抬到布局 8。
 # 框架的发布名换成了 arona-rs（`arona` 在 crates.io 上早被别的项目占了），库名仍是 arona，
 # 所以源码里的 `use arona::…` 一个字都不用改，只在依赖行重命名一次。
 # gui 由宿主决定，插件这边一律不强制打开（框架的 PLUGIN_DEVELOPMENT.md §16）。
