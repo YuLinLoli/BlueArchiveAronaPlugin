@@ -13,11 +13,13 @@ use once_cell::sync::OnceCell;
 use serde_json::Value;
 use std::sync::Mutex;
 
-/// 数据源顺序与超时策略对齐原版：GitHub -> schale.gg -> 国内镜像
+/// 候选源。原版顺序是 GitHub -> schale.gg -> 国内镜像（`SchaleDBUtil`），这边把国内镜像摆到最前：
+/// 部署机在国内时 `raw.githubusercontent.com` 基本连不通，摆第一个等于每轮先白等一次超时。
+/// 三个源是并发试的（见 `fetch_birthdays`），所以这个顺序只决定「同样快时先认谁」。
 const SOURCES: [&str; 3] = [
-    "https://raw.githubusercontent.com/SchaleDB/SchaleDB/main/",
-    "https://schale.gg/",
     "https://schaledb.brightsu.cn/",
+    "https://schale.gg/",
+    "https://raw.githubusercontent.com/SchaleDB/SchaleDB/main/",
 ];
 const STUDENTS_PATH: &str = "data/cn/students.min.json";
 const CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
@@ -54,24 +56,35 @@ pub async fn fetch_birthdays() -> Result<Vec<Birthday>, String> {
             return Ok(list.clone());
         }
     }
-    let mut last_error = "没有可用的 SchaleDB 数据源".to_string();
     // 联网同步是一个独立动作：日志要能看出是「同步生日」而不是调用它的查询/刷新
     arona::plugin::action_async("同步生日", async move {
-        for base in SOURCES {
-            match fetch_from(base).await {
-                Ok(list) if !list.is_empty() => {
-                    arona::runtime::log::info(format!(
-                        "SchaleDB 学生生日已同步: {} 条 (来源 {base})",
-                        list.len()
-                    ));
-                    *cache().lock().unwrap() = Some((list.clone(), now_ms() + CACHE_TTL_MS));
-                    return Ok(list);
-                }
-                Ok(_) => last_error = format!("{base} 未解析到生日数据"),
-                Err(err) => last_error = err,
-            }
-        }
-        Err(last_error)
+        // 三个源并发试，谁先给出非空结果就用谁、其余当场取消。
+        // 串行时最坏要等「源数 × 单次超时」，而国内连不通那个源几乎每次都吃满超时。
+        let attempts = SOURCES
+            .iter()
+            .map(|base| {
+                let base: &'static str = *base;
+                Box::pin(async move {
+                    match fetch_from(base).await {
+                        Ok(list) if !list.is_empty() => Ok((base, list)),
+                        Ok(_) => Err(format!("{base} 未解析到生日数据")),
+                        Err(err) => Err(err),
+                    }
+                })
+                    as arona::runtime::message::BoxFuture<
+                        'static,
+                        Result<(&'static str, Vec<Birthday>), String>,
+                    >
+            })
+            .collect::<Vec<_>>();
+        // select_ok 在全部失败时给出其中最后一个错误，与原先串行版的 last_error 同口径
+        let ((source, list), _rest) = futures_util::future::select_ok(attempts).await?;
+        arona::runtime::log::info(format!(
+            "SchaleDB 学生生日已同步: {} 条 (来源 {source})",
+            list.len()
+        ));
+        *cache().lock().unwrap() = Some((list.clone(), now_ms() + CACHE_TTL_MS));
+        Ok(list)
     })
     .await
 }
