@@ -353,8 +353,28 @@ fn insert_alert(
         Arc::new(move || {
             let activities = group.clone();
             let inner = scheduled.clone();
+            // 排定时刻与实际触发时刻的差，是这一族「推送晚了」问题唯一能落地的现场证据。
+            // 调度器本身毫秒级准（框架侧 single_at_fires_on_the_scheduled_moment 钉着），
+            // 所以这个差值只可能来自「派生出去的任务在排队」或「发送链路里被阻塞」——
+            // 下面两个量分别量这两段，下次再迟到就能一眼看出落在哪一段，不必再靠猜。
+            let drift = chrono::Utc::now().timestamp_millis() - expected_ms;
+            if drift > 60_000 {
+                arona::runtime::log::warning(format!(
+                    "活动预警触发迟到 {} 分（排定时刻 {expected_ms}），{} 条待发送",
+                    drift / 60_000,
+                    activities.len()
+                ));
+            }
+            let began = chrono::Utc::now().timestamp_millis();
             scheduled.spawn_as("活动预警", async move {
                 send_alert(inner.framework(), &activities, locale, before_hours).await;
+                let took = chrono::Utc::now().timestamp_millis() - began;
+                if took > 60_000 {
+                    arona::runtime::log::warning(format!(
+                        "活动预警从触发到发完耗时 {} 分：触发是准点的，卡在发送链路上",
+                        took / 60_000
+                    ));
+                }
             });
         }),
     );

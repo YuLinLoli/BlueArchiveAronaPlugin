@@ -62,8 +62,7 @@ pub async fn fetch_birthdays() -> Result<Vec<Birthday>, String> {
         // 串行时最坏要等「源数 × 单次超时」，而国内连不通那个源几乎每次都吃满超时。
         let attempts = SOURCES
             .iter()
-            .map(|base| {
-                let base: &'static str = *base;
+            .map(|&base| {
                 Box::pin(async move {
                     match fetch_from(base).await {
                         Ok(list) if !list.is_empty() => Ok((base, list)),
