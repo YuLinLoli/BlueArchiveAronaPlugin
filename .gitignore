@@ -3,5 +3,6 @@
 /data
 /logs
 /plugins
+/.idea/
 *.log
 *.pdb
