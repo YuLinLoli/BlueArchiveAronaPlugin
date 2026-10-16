@@ -95,14 +95,20 @@ async fn fetch_from(base: &str) -> Result<Vec<Birthday>, String> {
 }
 
 /// 解析 students.min.json：取 `Name` + `BirthDay`，跳过皮肤别名与非法日期
+///
+/// 顶层是按学生 Id 编键的对象（`{"10000":{"Name":"爱露","BirthDay":"3/12",…}}`），
+/// 早期镜像给的是数组，两种都收：解析一旦判死，三个源就全算失败、缓存永远填不上，
+/// 于是每次拉活动都要重跑一遍三源，只为等 github 那 20 秒超时。
 pub fn parse_students(json: &str) -> Result<Vec<Birthday>, String> {
     let root: Value =
         serde_json::from_str(json).map_err(|err| format!("SchaleDB 学生数据解析失败: {err}"))?;
-    let array = root
-        .as_array()
-        .ok_or_else(|| "SchaleDB 学生数据不是数组".to_string())?;
+    let entries: Vec<&Value> = match &root {
+        Value::Object(map) => map.values().collect(),
+        Value::Array(items) => items.iter().collect(),
+        _ => return Err("SchaleDB 学生数据不是对象也不是数组".to_string()),
+    };
     let mut out: Vec<Birthday> = Vec::new();
-    for item in array {
+    for item in entries {
         let Some(name) = item
             .get("Name")
             .and_then(|v| v.as_str())
@@ -208,14 +214,15 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    const SAMPLE: &str = r#"[
-      {"Name":"爱露","BirthDay":"3/12","Birthday":"3月12日"},
-      {"Name":"爱露（泳装）","BirthDay":"3/12"},
-      {"Name":"玛丽","BirthDay":"9/12"},
-      {"Name":"坏数据","BirthDay":"-"},
-      {"Name":"缺生日"},
-      {"Name":"越界","BirthDay":"13/40"}
-    ]"#;
+    /// 线上真实结构：顶层是按学生 Id 编键的对象（schaledb.brightsu.cn 实测形状）
+    const SAMPLE: &str = r#"{
+      "10000":{"Name":"爱露","BirthDay":"3/12","Birthday":"3月12日"},
+      "10001":{"Name":"玛丽","BirthDay":"9/12"},
+      "10002":{"Name":"爱露（泳装）","BirthDay":"3/12"},
+      "10003":{"Name":"坏数据","BirthDay":"-"},
+      "10004":{"Name":"缺生日"},
+      "10005":{"Name":"越界","BirthDay":"13/40"}
+    }"#;
 
     #[test]
     fn parse_filters_skins_and_invalid_dates() {
@@ -224,6 +231,17 @@ mod tests {
         assert!(list.iter().any(|b| b.name == "爱露"));
         assert!(list.iter().any(|b| b.name == "玛丽"));
         assert!(!list.iter().any(|b| b.name.contains('（')));
+    }
+
+    /// 早期镜像给的是数组，同一批条目要解析出同样的结果
+    #[test]
+    fn parse_accepts_array_shaped_payload() {
+        let array_form = r#"[{"Name":"爱露","BirthDay":"3/12"},{"Name":"玛丽","BirthDay":"9/12"}]"#;
+        assert_eq!(
+            parse_students(array_form).unwrap(),
+            parse_students(SAMPLE).unwrap(),
+            "两种顶层形状应给出同一份生日"
+        );
     }
 
     #[test]
