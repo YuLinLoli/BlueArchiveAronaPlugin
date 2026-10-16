@@ -102,6 +102,23 @@ cargo clippy --all-targets
 进程、OneBot 连接与 tokio 运行时都归框架，插件只交出 `AronaPlugin` 的实现——
 这点和 mirai 的插件 jar 一样。
 
+## 内存与字体
+
+- **字面只在这次出图期间存在**。fontdue 会把字体文件里**每个码位**的字形轮廓全量预解析后常驻，
+  实测本机命中 msyh 那一档是 160.6 MB（simhei 126、simsun 156、Noto 170——量级只跟字形个数与轮廓
+  复杂度走，跟字体文件多大无关，所以换小文件省不下来）。原来那是 `static FONTS: OnceLock<Option<Fonts>>`，
+  一旦解析就永远还不掉；现在缓存只存 `Weak`：谁出图谁拿 `Arc`（`text::acquire()`），最后一个落下
+  就整个还给分配器，同一次出图里多次取复用同一份。代价是不连续出图的那一次要重解析（实测 0.34~0.36 s）。
+- **忘取字面是编译不过，不是悄悄画一张没字的图**：`measure`/`line_metrics`/`draw_line`/`draw_centered`
+  都显式收 `&Fonts`，原来的 `available()` 已删。`gacha` 那两处"有字体才画字"改成 `Option<&Fonts>`，
+  字体缺时照旧出无字图、不拒回。
+- **读数怎么量**：`src/memprobe.rs` 是只在 `cfg(test)` 编译的计数分配器（生产 dll 不含），给出存活字节、
+  高水位、以及 drop 之后回不回得到基线，另从 `K32GetProcessMemoryInfo` 取工作集与私有字节
+  （任务管理器「内存」那一列就是工作集）。跑法：
+  `cargo test --release --lib -- --ignored --test-threads=1 --nocapture the_font_lives_only`。
+  本机实测：取字面 160.6 MB → drop 之后 0.0 MB，工作集 6.9 → 13.3 MB、私有 1.3 → 9.5 MB；
+  出图期间第二次 `acquire` 多占 0.0 MB、耗时 0.000 ms（在复用而非重解析）。两条都钉成了断言。
+
 ## 与框架的版本关系
 
 本仓库按 `arona-rs 1.1.0`（符号布局 8、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
