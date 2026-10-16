@@ -144,10 +144,9 @@ async fn fetch_all(servers: &[ServerLocale]) -> Vec<(ServerLocale, Activities)> 
     for &server in servers {
         match data::activity::fetch(server).await {
             Ok(pair) => pairs.push((server, pair)),
-            Err(err) => arona::runtime::log::warning(format!(
-                "拉取{}活动失败: {err}",
-                server.server_name()
-            )),
+            Err(err) => {
+                arona::runtime::log::warning(format!("拉取{}活动失败: {err}", server.server_name()))
+            }
         }
     }
     pairs

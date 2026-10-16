@@ -47,7 +47,7 @@
 3. 启动框架。日志里应该有握手通过与装载成功两行，GUI 的「插件管理」页同时就能看到它：
 
    ```
-   [Arona] 插件 ABI 握手通过: 布局 9，契约 1.0.0
+   [Arona] 插件 ABI 握手通过: 布局 10，契约 1.0.0
    [Arona] 已装载动态插件: BluearchivePlugin 0.4.3 (bluearchive_plugin.dll)
    ```
 
@@ -93,7 +93,7 @@ cargo clippy --all-targets
 发布口径是 git 标签或 crates.io 依赖（`arona = { package = "arona-rs", version = "1.1.0", … }`）——
 接口需求已经跨过了已发布的标签：符号布局 5 那批（`Bot`/`Group`/`Member` 对象模型、聊天记录库
 走宿主侧 trait 出口、`Image` 句柄）不在已推送的 `v1.0.0` 里，符号布局 6 起定时任务改走宿主通道
-（`framework.jobs()`）本地 `v1.1.0` 标签（布局 5）也还没有，而框架 HEAD 已经抬到布局 9，所以这里
+（`framework.jobs()`）本地 `v1.1.0` 标签（布局 5）也还没有，而框架 HEAD 已经抬到布局 10，所以这里
 先停在 path。
 要把这个仓库发给别人用时，换成 git 标签或 crates.io 依赖再提交 —— 注释里写着具体那一行。
 
@@ -141,7 +141,7 @@ cargo clippy --all-targets
 
 ## 与框架的版本关系
 
-本仓库按 `arona-rs 1.1.0`（符号布局 9、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
+本仓库按 `arona-rs 1.1.0`（符号布局 10、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
 `PluginContext` 运行期能力）。契约允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
 提交里把示例插件（框架仓库的 `plugins/hello`）改到能编译，本仓库跟着同步一次。升级框架后
 重新 `cargo build --release` 就行——真混了版本，握手会在装载那一步替你挡下来。
