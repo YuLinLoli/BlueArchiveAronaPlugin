@@ -58,6 +58,7 @@ dependencies = [
 name = "arona-rs"
 version = "1.1.0"
 dependencies = [
+ "ab_glyph",
  "axum",
  "base64",
  "chrono",
@@ -168,7 +169,6 @@ dependencies = [
 name = "bluearchive-plugin"
 version = "0.4.3"
 dependencies = [
- "ab_glyph",
  "arona-rs",
  "chrono",
  "futures-util",
