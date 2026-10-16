@@ -116,6 +116,43 @@ fn resolve_targets(config: &NotifyConfig, global_groups: Vec<i64>) -> Vec<i64> {
         .collect()
 }
 
+/// 配置里启用的服务器（日服 → 国际服 → 国服，与推送次序一致）
+fn enabled_servers(config: &NotifyConfig) -> Vec<ServerLocale> {
+    let mut servers: Vec<ServerLocale> = Vec::new();
+    if config.jp {
+        servers.push(ServerLocale::JP);
+    }
+    if config.global {
+        servers.push(ServerLocale::GLOBAL);
+    }
+    if config.cn {
+        servers.push(ServerLocale::CN);
+    }
+    servers
+}
+
+/// 一个服务器的活动数据：(进行中, 即将开始)
+type Activities = (Vec<Activity>, Vec<Activity>);
+
+/// 按日服 → 国际服 → 国服的顺序各拉一次，日历与预警共用这一份
+/// （原先预警阶段和日历阶段各自拉一遍，一次推送要发 6 次活动查询）
+///
+/// 这里是故意串行而不是并发：活动查询本身只要 0.2 秒，而它顺带拉的学生生日有 1.75 MB，
+/// 并发会让那一份被同时下三遍；顺序跑第一服就把缓存喂热了，后两服不再联网。
+async fn fetch_all(servers: &[ServerLocale]) -> Vec<(ServerLocale, Activities)> {
+    let mut pairs: Vec<(ServerLocale, Activities)> = Vec::new();
+    for &server in servers {
+        match data::activity::fetch(server).await {
+            Ok(pair) => pairs.push((server, pair)),
+            Err(err) => arona::runtime::log::warning(format!(
+                "拉取{}活动失败: {err}",
+                server.server_name()
+            )),
+        }
+    }
+    pairs
+}
+
 /// 每日推送与预警调度入口
 /// skip_image=true 表示启动时的初始化运行: 只做 5小时/1小时 预警调度, 不推送日历
 pub async fn push(ctx: &PluginContext, skip_image: bool) {
@@ -133,43 +170,37 @@ pub async fn push(ctx: &PluginContext, skip_image: bool) {
         arona::runtime::log::warning("活动推送未执行: 未配置推送目标群");
         return;
     }
-    schedule_alerts(ctx).await;
-    if skip_image {
-        return;
-    }
+    let pairs = fetch_all(&enabled_servers(&config)).await;
     // 日历一天只推一次：定时任务被重复触发/重建、系统时钟回拨让整点又走一遍、启动 20 秒
     // 后的测试推送与定时任务撞在一起，第二条都在这里被吃掉，免得群里出现两份日历。
-    // 认领放在 skip_image 之后——启动初始化那一趟只调度预警、不发日历，不该占当天的名额。
-    let day = daily_push_day(chrono::Local::now());
-    if !claim_daily_push_day(&LAST_DAILY_PUSH_DAY, day) {
-        arona::runtime::log::info("今日活动日历已推送过, 跳过本次重复触发");
-        return;
+    // 认领只吃掉日历那一步，预警调度照旧每轮都跑（它与日历共用这份数据，不重复发）。
+    let mut push_calendar = !skip_image;
+    if push_calendar {
+        let day = daily_push_day(chrono::Local::now());
+        push_calendar = claim_daily_push_day(&LAST_DAILY_PUSH_DAY, day);
+        if !push_calendar {
+            arona::runtime::log::info("今日活动日历已推送过, 跳过本次重复触发");
+        }
     }
-    let mut servers: Vec<ServerLocale> = Vec::new();
-    if config.jp {
-        servers.push(ServerLocale::JP);
+    // 日历排在预警之前：预警阶段可能有几条正落在 ±10 分钟窗口里的活动要就地发送，
+    // 让它们挡在整点日历前面，等于用户看到的推送又晚一轮。
+    if push_calendar {
+        for (server, pair) in &pairs {
+            let prefix = format!("{}({})", config.notify_text, server.server_name());
+            push_server(framework, *server, pair, &prefix, &targets).await;
+        }
     }
-    if config.global {
-        servers.push(ServerLocale::GLOBAL);
-    }
-    if config.cn {
-        servers.push(ServerLocale::CN);
-    }
-    for server in servers {
-        let prefix = format!("{}({})", config.notify_text, server.server_name());
-        push_server(framework, server, &prefix, &targets).await;
-    }
+    schedule_alerts(ctx, &pairs).await;
 }
 
 /// 向目标群推送某个服务器的活动日历（文本前缀 + 活动图片, 图片渲染失败时回退文本）
-async fn push_server(framework: &Framework, server: ServerLocale, prefix: &str, targets: &[i64]) {
-    let pair = match data::activity::fetch(server).await {
-        Ok(pair) => pair,
-        Err(err) => {
-            arona::runtime::log::warning(format!("拉取{}活动失败: {err}", server.server_name()));
-            return;
-        }
-    };
+async fn push_server(
+    framework: &Framework,
+    server: ServerLocale,
+    pair: &Activities,
+    prefix: &str,
+    targets: &[i64],
+) {
     let message = match crate::image::activity::render_async(pair.clone(), server).await {
         Ok(file) => {
             OutgoingMessage::text(format!("{prefix}\n"))
@@ -180,7 +211,7 @@ async fn push_server(framework: &Framework, server: ServerLocale, prefix: &str, 
                 "{}活动图片生成失败, 回退文本: {err}",
                 server.server_name()
             ));
-            let calendar = data::activity::format_calendar(&pair, server);
+            let calendar = data::activity::format_calendar(pair, server);
             OutgoingMessage::text(format!("{prefix}\n{calendar}"))
         }
     };
@@ -201,32 +232,11 @@ async fn push_server(framework: &Framework, server: ServerLocale, prefix: &str, 
     }
 }
 
-/// 查询并安排各服务器的活动结束预警
-async fn schedule_alerts(ctx: &PluginContext) {
-    let config = config::notify(ctx.framework());
-    let mut servers: Vec<ServerLocale> = Vec::new();
-    if config.jp {
-        servers.push(ServerLocale::JP);
-    }
-    if config.global {
-        servers.push(ServerLocale::GLOBAL);
-    }
-    if config.cn {
-        servers.push(ServerLocale::CN);
-    }
-    for server in servers {
-        let pair = match data::activity::fetch(server).await {
-            Ok(pair) => pair,
-            Err(err) => {
-                arona::runtime::log::warning(format!(
-                    "拉取{}活动失败: {err}",
-                    server.server_name()
-                ));
-                continue;
-            }
-        };
+/// 安排各服务器的活动结束预警（数据由 `fetch_all` 一次拉好，这里不再联网）
+async fn schedule_alerts(ctx: &PluginContext, pairs: &[(ServerLocale, Activities)]) {
+    for (server, pair) in pairs {
         for (activities, hours) in alert_plan(&pair.0) {
-            schedule_alert_group(ctx, &activities, server, hours).await;
+            schedule_alert_group(ctx, &activities, *server, hours).await;
         }
     }
 }
@@ -925,19 +935,10 @@ mod tests {
         let (framework, sender) = isolated();
         let config = config::notify(&framework);
         let targets = resolve_targets(&config, framework.gating().groups());
-        let mut servers: Vec<ServerLocale> = Vec::new();
-        if config.jp {
-            servers.push(ServerLocale::JP);
-        }
-        if config.global {
-            servers.push(ServerLocale::GLOBAL);
-        }
-        if config.cn {
-            servers.push(ServerLocale::CN);
-        }
-        for server in servers {
+        let servers = enabled_servers(&config);
+        for (server, pair) in fetch_all(&servers).await {
             let prefix = format!("{}({})", config.notify_text, server.server_name());
-            push_server(&framework, server, &prefix, &targets).await;
+            push_server(&framework, server, &pair, &prefix, &targets).await;
         }
 
         let sent = sender.take();
