@@ -48,7 +48,7 @@
 
    ```
    [Arona] 插件 ABI 握手通过: 布局 9，契约 1.0.0
-   [Arona] 已装载动态插件: BluearchivePlugin 0.4.2 (bluearchive_plugin.dll)
+   [Arona] 已装载动态插件: BluearchivePlugin 0.4.3 (bluearchive_plugin.dll)
    ```
 
 装好后配置与数据都落在框架的运行目录里，本仓库不需要也不应该提交它们：
@@ -104,11 +104,24 @@ cargo clippy --all-targets
 
 ## 内存与字体
 
-- **字面只在这次出图期间存在**。fontdue 会把字体文件里**每个码位**的字形轮廓全量预解析后常驻，
-  实测本机命中 msyh 那一档是 160.6 MB（simhei 126、simsun 156、Noto 170——量级只跟字形个数与轮廓
-  复杂度走，跟字体文件多大无关，所以换小文件省不下来）。原来那是 `static FONTS: OnceLock<Option<Fonts>>`，
-  一旦解析就永远还不掉；现在缓存只存 `Weak`：谁出图谁拿 `Arc`（`text::acquire()`），最后一个落下
-  就整个还给分配器，同一次出图里多次取复用同一份。代价是不连续出图的那一次要重解析（实测 0.34~0.36 s）。
+- **栅格化是惰性的**（2026-10-17 从 fontdue 换过来，与 bilibili 插件同一档）。fontdue 会把字体文件里
+  **每个码位**的字形轮廓全量预解析后常驻，实测本机命中 msyh 那一档是 160.6 MB（simhei 126、simsun 156、
+  Noto 170——量级只跟字形个数与轮廓复杂度走，跟字体文件多大无关，换小文件省不下来）。现在 `ab_glyph`
+  只把字体文件的原始字节留在内存里，画到哪个字才解析哪个字，栅格结果进一层按 (字符, 字号) 计的有界 LRU
+  （4096 条，`GLYPH_CACHE_MAX`）。换后端**不改观感**：两档的几何在 bilibili 那侧逐字比过（TrueType 与 CFF
+  两类轮廓都验），包围盒与 advance 最大偏差 0 格、0.0 px。
+  一条必须记的坑：ab_glyph 的 `PxScale` 基准是 `height_unscaled() = ascent - descent`（雅黑 1320）而不是
+  `unitsPerEm`（1000），不换算整张图的文字会整体小 24%——`scale_of()` 就是这道换算。
+  `line_metrics` 也照 fontdue 的口径重算了一遍（hhea 三个数乘 `px / units_per_em`，
+  `new_line_size = ascent - descent + line_gap`），行盒高度对不上就是这里。
+- **字面优先取框架随包那一份**：`arona::runtime::assets::cjk_font()` 给的是安装目录 `fonts/` 下的思源宋体
+  （与 GUI、bilibili 插件同一个出口），拿不到才扫系统字体目录。所以部署机上这张图的字体与面板一致，
+  不随"这台机器装了什么字体"漂。
+- **字面只在这次出图期间存在**：缓存只存 `Weak`，谁出图谁拿 `Arc`（`text::acquire()`），最后一个落下
+  就整个还给分配器，同一次出图里多次取复用同一份。惰性后端下装载本来就只要 0.04 s（fontdue 那一档是
+  0.34~0.36 s），所以"还掉再取"这件事几乎不要钱——但口径没变，仍然不常驻。
+- **集合字体只认第 0 面**（`FontArc` 没有面索引这一档）。随包的思源宋体是单面 `.otf`，系统那些中文字体
+  第 0 面就是常规字面，所以这一档实际没被用到；真要指定某一面，把自己那份拆成单面文件放进 `fonts/`。
 - **忘取字面是编译不过，不是悄悄画一张没字的图**：`measure`/`line_metrics`/`draw_line`/`draw_centered`
   都显式收 `&Fonts`，原来的 `available()` 已删。`gacha` 那两处"有字体才画字"改成 `Option<&Fonts>`，
   字体缺时照旧出无字图、不拒回。
@@ -116,12 +129,14 @@ cargo clippy --all-targets
   高水位、以及 drop 之后回不回得到基线，另从 `K32GetProcessMemoryInfo` 取工作集与私有字节
   （任务管理器「内存」那一列就是工作集）。跑法：
   `cargo test --release --lib -- --ignored --test-threads=1 --nocapture the_font_lives_only`。
-  本机实测：取字面 160.6 MB → drop 之后 0.0 MB，工作集 6.9 → 13.3 MB、私有 1.3 → 9.5 MB；
-  出图期间第二次 `acquire` 多占 0.0 MB、耗时 0.000 ms（在复用而非重解析）。两条都钉成了断言。
+  本机实测（换后端之后）：取字面 **18.8 MB**、解析 0.04 s → drop 之后 **0.0 MB**，
+  工作集 6.8 → 7.2 MB、私有 1.2 → 1.3 MB、进程峰值工作集 26.0 MB；
+  出图期间第二次 `acquire` 多占 0.0 MB、耗时 0.000 ms（在复用而非重装载）。两条都钉成了断言。
+  换之前同一枚探针的读数：字面 160.6 MB、解析 0.34~0.36 s。
 
 ## 与框架的版本关系
 
-本仓库按 `arona-rs 1.1.0`（符号布局 8、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
+本仓库按 `arona-rs 1.1.0`（符号布局 9、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
 `PluginContext` 运行期能力）。契约允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
 提交里把示例插件（框架仓库的 `plugins/hello`）改到能编译，本仓库跟着同步一次。升级框架后
 重新 `cargo build --release` 就行——真混了版本，握手会在装载那一步替你挡下来。
