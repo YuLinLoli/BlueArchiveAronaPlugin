@@ -25,6 +25,12 @@ mod dispatcher;
 mod entity;
 mod gacha;
 mod image;
+/// 内存探针：只在测试构建里编译，用来把"字面那份轮廓常驻到底有多大、出图之后回不回得来"落成数字
+#[cfg(test)]
+mod memprobe;
+#[cfg(test)]
+#[global_allocator]
+static MEMORY_PROBE: memprobe::Counting = memprobe::Counting;
 mod runtime;
 mod util;
 

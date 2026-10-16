@@ -5,7 +5,7 @@
 use crate::image::draw;
 use image::RgbaImage;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// 字体集合：faces[0] 为默认可用面（可能来自 .ttc 的某个 collection index）
 pub struct Fonts {
@@ -18,16 +18,31 @@ impl Fonts {
     }
 }
 
-static FONTS: OnceLock<Option<Fonts>> = OnceLock::new();
+/// 字面缓存**只存 Weak**。fontdue 会把字体文件里每个码位的字形轮廓全量预解析后常驻，
+/// 实测这一档就是 126 MB（simhei 文件才 9.3 MB；换 msyh、simsun、Noto 都在 120~190 MB 这个量级），
+/// 而它只在出图的那一瞬间用得上——所以不该由一个 `static` 替进程长期按着它。
+/// 谁在出图谁拿着 `Arc`（见 [`acquire`]），最后一个 Arc 落下后轮廓整个还给分配器；
+/// 下一次出图再解析一遍（实测 0.3 s 量级），解析期间握着锁，同批并发出图不会各解析一份。
+static CACHE: OnceLock<Mutex<Weak<Fonts>>> = OnceLock::new();
 
-/// 获取全局字体；未找到任何可用字体时返回 None（调用方回退为文本输出）
-pub fn fonts() -> Option<&'static Fonts> {
-    FONTS.get_or_init(discover).as_ref()
+/// 取字面：槽里还有人拿着就复用，没有才去盘上找并解析。
+/// 回 `None` 就是"本机没有能渲染中文的字体"——调用方要么按无文本出图，要么明确报错，
+/// 口径与原来的 `available()` 相同，只是这一份不再常驻。
+pub fn acquire() -> Option<Arc<Fonts>> {
+    let cache = CACHE.get_or_init(Default::default);
+    let mut slot = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(alive) = slot.upgrade() {
+        return Some(alive);
+    }
+    let fresh = Arc::new(discover()?);
+    *slot = Arc::downgrade(&fresh);
+    Some(fresh)
 }
 
 /// 文本宽度（px），用于居中/右对齐排版
-pub fn measure(text: &str, size: f32) -> f32 {
-    let Some(fonts) = fonts() else { return 0.0 };
+pub fn measure(fonts: &Fonts, text: &str, size: f32) -> f32 {
     let font = fonts.face();
     let mut width = 0.0f32;
     for ch in text.chars() {
@@ -38,14 +53,14 @@ pub fn measure(text: &str, size: f32) -> f32 {
 }
 
 /// 单行文字基线指标: (ascent, descent, new_line_size)
-pub fn line_metrics(size: f32) -> Option<(f32, f32, f32)> {
-    let font = fonts()?.face();
-    let lm = font.horizontal_line_metrics(size)?;
+pub fn line_metrics(fonts: &Fonts, size: f32) -> Option<(f32, f32, f32)> {
+    let lm = fonts.face().horizontal_line_metrics(size)?;
     Some((lm.ascent, lm.descent, lm.new_line_size))
 }
 
 /// 在 (x, baseline_y) 处绘制一行文字（y 轴向下为正），带抗锯齿与 alpha 混合
 pub fn draw_line(
+    fonts: &Fonts,
     img: &mut RgbaImage,
     text: &str,
     x: f32,
@@ -53,7 +68,6 @@ pub fn draw_line(
     size: f32,
     color: draw::Color,
 ) {
-    let Some(fonts) = fonts() else { return };
     let font = fonts.face();
     let mut cursor = x;
     for ch in text.chars() {
@@ -86,6 +100,7 @@ pub fn draw_line(
 // 绘图入参就是目标区域几何 + 字号 + 颜色，天然超 7 个
 #[allow(clippy::too_many_arguments)]
 pub fn draw_centered(
+    fonts: &Fonts,
     img: &mut RgbaImage,
     text: &str,
     area_x: i32,
@@ -95,10 +110,10 @@ pub fn draw_centered(
     size: f32,
     color: draw::Color,
 ) {
-    let width = measure(text, size);
+    let width = measure(fonts, text, size);
     let x = area_x as f32 + (area_w as f32 - width) / 2.0;
     let baseline = area_y as f32 + area_h as f32 / 2.0 + size * 0.42;
-    draw_line(img, text, x, baseline, size, color);
+    draw_line(fonts, img, text, x, baseline, size, color);
 }
 
 fn is_cjk(font: &fontdue::Font) -> bool {
@@ -235,7 +250,74 @@ fn discover() -> Option<Fonts> {
     None
 }
 
-/// 字体是否可用（供命令快速决定回退）
-pub fn available() -> bool {
-    fonts().is_some()
+#[cfg(test)]
+mod memprobe_tests {
+    use super::*;
+    use crate::memprobe::{live, mb, os_footprint};
+    use std::time::Instant;
+
+    /// 字面这份常驻的两条钉子：**同一次出图里复用同一份**（第二次拿不该再解析一遍），
+    /// 以及**出图结束之后整个还掉**。要单线程独占进程跑，否则并发用例的存活字节会一起算进来：
+    /// `cargo test --release --lib -- --ignored --test-threads=1 --nocapture memprobe`
+    #[test]
+    #[ignore = "要读系统字体，且得独占进程才读得准"]
+    fn the_font_lives_only_as_long_as_the_render_does() {
+        let base = live();
+        let (ws0, _, priv0) = os_footprint();
+        let start = Instant::now();
+        let Some(first) = acquire() else {
+            println!("（本机找不到可渲染中文的字体，这一条验不了）");
+            return;
+        };
+        let parsed = start.elapsed();
+        let held = live() - base;
+        // 真用它一次，别让这一份 Arc 被当成没用到
+        let width = measure(&first, "活动日历", 32.0);
+        let again = Instant::now();
+        let second = acquire().expect("第一次拿得到，第二次也该拿得到");
+        let reused = live() - base;
+        let reuse_cost = again.elapsed();
+
+        println!(
+            "字面常驻 {}（解析 {:.2} s，量到宽度 {width:.0}px）",
+            mb(held),
+            parsed.as_secs_f64()
+        );
+        println!(
+            "出图期间再拿一次：常驻 {}（多 {}），耗时 {:.3} ms",
+            mb(reused),
+            mb(reused.saturating_sub(held)),
+            reuse_cost.as_secs_f64() * 1000.0
+        );
+        drop(second);
+        drop(first);
+        let rest = live() - base;
+        let (ws1, peak, priv1) = os_footprint();
+        println!(
+            "drop 之后存活 {}，工作集 {} → {}，私有 {} → {}，进程峰值工作集 {}",
+            mb(rest),
+            mb(ws0),
+            mb(ws1),
+            mb(priv0),
+            mb(priv1),
+            mb(peak)
+        );
+        // 复用那条：Weak  upgrade 只多一份引用，不该再解析第二遍
+        assert!(
+            reused.saturating_sub(held) < 4 * 1024 * 1024,
+            "同一次出图里第二次 acquire 多占了 {}，像是在重解析",
+            mb(reused.saturating_sub(held))
+        );
+        assert!(
+            reuse_cost.as_millis() < 50,
+            "第二次 acquire 花了 {:.1} ms，不是在复用",
+            reuse_cost.as_secs_f64() * 1000.0
+        );
+        // 这一条是「用完就释放」的闸：出图结束还回不到基线，就是有强引用没放
+        assert!(
+            rest < 8 * 1024 * 1024,
+            "drop 之后仍常驻 {}，说明字面还被谁按着",
+            mb(rest)
+        );
+    }
 }

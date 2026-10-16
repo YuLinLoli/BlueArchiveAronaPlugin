@@ -38,9 +38,10 @@ pub fn render(
     pair: &(Vec<Activity>, Vec<Activity>),
     server: ServerLocale,
 ) -> Result<PathBuf, String> {
-    if !text::available() {
+    // 字面只在这一次渲染期间存在（口径见 text::acquire 的说明）：拿不到就是本机没有中文字体
+    let Some(fonts) = text::acquire() else {
         return Err("未找到可用中文字体, 无法生成活动图片".to_string());
-    }
+    };
     let (active, pending) = pair;
     let mut active = active.clone();
     let mut pending = pending.clone();
@@ -54,40 +55,40 @@ pub fn render(
     let footer = "数据来源: https://ba.gamekee.com/";
 
     // 画布宽度: 取标题与最宽“内容+时间”行的自然宽度, 限制在 MIN..MAX
-    let mut widest = text::measure(&title, TITLE_SIZE) as i32;
-    widest = widest.max(text::measure(&date, DATE_SIZE) as i32);
+    let mut widest = text::measure(&fonts, &title, TITLE_SIZE) as i32;
+    widest = widest.max(text::measure(&fonts, &date, DATE_SIZE) as i32);
     for row in active_rows.iter().chain(pending_rows.iter()) {
-        widest = widest.max(row.content_width());
+        widest = widest.max(row.content_width(&fonts));
     }
-    widest = widest.max(text::measure(footer, FOOTER_SIZE) as i32);
+    widest = widest.max(text::measure(&fonts, footer, FOOTER_SIZE) as i32);
     let width = (widest + PAD_X * 2).clamp(MIN_WIDTH, MAX_WIDTH);
 
     // 画布高度 = 按绘制顺序累加各元素盒高
     let mut height = PAD_Y;
-    height += line_box(TITLE_SIZE);
-    height += line_box(DATE_SIZE) + 10;
-    height += draw_sections_preview(&active_rows, &pending_rows, width);
-    height += line_box(FOOTER_SIZE) + PAD_Y;
+    height += line_box(&fonts, TITLE_SIZE);
+    height += line_box(&fonts, DATE_SIZE) + 10;
+    height += draw_sections_preview(&fonts, &active_rows, &pending_rows, width);
+    height += line_box(&fonts, FOOTER_SIZE) + PAD_Y;
 
     let mut img = RgbaImage::new(width as u32, height.max(120) as u32);
     draw::fill_rect(&mut img, 0, 0, width, height, draw::rgb(255, 255, 255));
 
     let mut y = PAD_Y as f32;
     // 标题（居中）
-    let title_h = line_box(TITLE_SIZE);
-    draw_line_centered(&mut img, &title, y, title_h, TITLE_SIZE, INK);
+    let title_h = line_box(&fonts, TITLE_SIZE);
+    draw_line_centered(&fonts, &mut img, &title, y, title_h, TITLE_SIZE, INK);
     y += title_h as f32;
     // 日期（右对齐）
-    let date_h = line_box(DATE_SIZE);
-    draw_line_right(&mut img, &date, width, y, date_h, DATE_SIZE, GRAY);
+    let date_h = line_box(&fonts, DATE_SIZE);
+    draw_line_right(&fonts, &mut img, &date, width, y, date_h, DATE_SIZE, GRAY);
     y += date_h as f32 + 10.0;
     // 正在进行
-    y = draw_section_rows(&mut img, y, width, "正在进行", &active_rows);
+    y = draw_section_rows(&fonts, &mut img, y, width, "正在进行", &active_rows);
     // 即将开始
-    y = draw_section_rows(&mut img, y, width, "即将开始", &pending_rows);
+    y = draw_section_rows(&fonts, &mut img, y, width, "即将开始", &pending_rows);
     // 数据来源
-    let footer_h = line_box(FOOTER_SIZE);
-    draw_line_left(&mut img, footer, y, footer_h, FOOTER_SIZE, GRAY);
+    let footer_h = line_box(&fonts, FOOTER_SIZE);
+    draw_line_left(&fonts, &mut img, footer, y, footer_h, FOOTER_SIZE, GRAY);
 
     let file = image_path(server);
     if let Some(parent) = file.parent() {
@@ -123,18 +124,18 @@ struct Row {
 }
 
 impl Row {
-    fn content_width(&self) -> i32 {
-        let content_w = text::measure(&self.content, CONTENT_SIZE) as i32;
+    fn content_width(&self, fonts: &text::Fonts) -> i32 {
+        let content_w = text::measure(fonts, &self.content, CONTENT_SIZE) as i32;
         let time_w = if self.time_text.is_empty() {
             0
         } else {
-            text::measure(&self.time_text, TIME_SIZE) as i32 + 30
+            text::measure(fonts, &self.time_text, TIME_SIZE) as i32 + 30
         };
         content_w + time_w + PAD_X
     }
 
-    fn box_height(&self) -> i32 {
-        let line = line_box(CONTENT_SIZE).max(line_box(TIME_SIZE));
+    fn box_height(&self, fonts: &text::Fonts) -> i32 {
+        let line = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
         line + 16
     }
 }
@@ -165,31 +166,43 @@ fn collect_rows(activities: &[Activity], future: bool) -> Vec<Row> {
 }
 
 /// 单行文本的盒高（行距 + 上下留白）
-fn line_box(size: f32) -> i32 {
-    let line = text::line_metrics(size)
+fn line_box(fonts: &text::Fonts, size: f32) -> i32 {
+    let line = text::line_metrics(fonts, size)
         .map(|(_, _, new_line)| new_line)
         .unwrap_or(size * 1.3);
     line.ceil() as i32
 }
 
 /// 预览高度: 两个分组标题 + 所有活动行盒高之和
-fn draw_sections_preview(active_rows: &[Row], pending_rows: &[Row], width: i32) -> i32 {
-    let section_h = line_box(SECTION_SIZE) + 12;
+fn draw_sections_preview(
+    fonts: &text::Fonts,
+    active_rows: &[Row],
+    pending_rows: &[Row],
+    width: i32,
+) -> i32 {
+    let section_h = line_box(fonts, SECTION_SIZE) + 12;
     let mut total = section_h * 2;
     for rows in [active_rows, pending_rows] {
         for row in rows {
             let _ = width;
-            total += row.box_height() + 8;
+            total += row.box_height(fonts) + 8;
         }
     }
     total
 }
 
 /// 绘制一个分组（标题 + 色块行），返回下一元素起点 y
-fn draw_section_rows(img: &mut RgbaImage, y: f32, width: i32, label: &str, rows: &[Row]) -> f32 {
+fn draw_section_rows(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    y: f32,
+    width: i32,
+    label: &str,
+    rows: &[Row],
+) -> f32 {
     let mut cursor = y;
     // 分组标题: 左侧色条 + 深色文字
-    let section_h = line_box(SECTION_SIZE);
+    let section_h = line_box(fonts, SECTION_SIZE);
     draw::fill_rect(
         img,
         PAD_X - 6,
@@ -198,21 +211,29 @@ fn draw_section_rows(img: &mut RgbaImage, y: f32, width: i32, label: &str, rows:
         section_h - 8,
         draw::rgb(90, 150, 255),
     );
-    draw_line_left(img, label, cursor, section_h, SECTION_SIZE, INK);
+    draw_line_left(fonts, img, label, cursor, section_h, SECTION_SIZE, INK);
     cursor += section_h as f32 + 12.0;
     for row in rows {
-        let block_h = row.box_height();
-        draw_activity_block(img, row, width, cursor, block_h);
+        let block_h = row.box_height(fonts);
+        draw_activity_block(fonts, img, row, width, cursor, block_h);
         cursor += block_h as f32 + 8.0;
     }
     cursor
 }
 
-fn draw_activity_block(img: &mut RgbaImage, row: &Row, width: i32, y: f32, block_h: i32) {
+fn draw_activity_block(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    row: &Row,
+    width: i32,
+    y: f32,
+    block_h: i32,
+) {
     if row.content == "无" {
-        let line_h = line_box(CONTENT_SIZE).max(line_box(TIME_SIZE));
+        let line_h = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
         let top = y + (block_h as f32 - line_h as f32) / 2.0;
         draw_line_left_at(
+            fonts,
             img,
             "无",
             PAD_X as f32,
@@ -228,11 +249,12 @@ fn draw_activity_block(img: &mut RgbaImage, row: &Row, width: i32, y: f32, block
     let time_w = if row.time_text.is_empty() {
         0
     } else {
-        text::measure(&row.time_text, TIME_SIZE) as i32 + 34
+        text::measure(fonts, &row.time_text, TIME_SIZE) as i32 + 34
     };
     let available = width - PAD_X * 2 - time_w;
-    if text::measure(&content, CONTENT_SIZE) as i32 > available {
-        while !content.is_empty() && text::measure(&content, CONTENT_SIZE) as i32 > available {
+    if text::measure(fonts, &content, CONTENT_SIZE) as i32 > available {
+        while !content.is_empty() && text::measure(fonts, &content, CONTENT_SIZE) as i32 > available
+        {
             content.pop();
         }
         content.push('…');
@@ -247,10 +269,12 @@ fn draw_activity_block(img: &mut RgbaImage, row: &Row, width: i32, y: f32, block
         22,
         level_color(row.level),
     );
-    let box_top =
-        y + (block_h as f32 - line_box(CONTENT_SIZE).max(line_box(TIME_SIZE)) as f32) / 2.0;
-    let line_h = line_box(CONTENT_SIZE).max(line_box(TIME_SIZE));
+    let box_top = y
+        + (block_h as f32 - line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE)) as f32)
+            / 2.0;
+    let line_h = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
     draw_line_left_at(
+        fonts,
         img,
         &content,
         PAD_X as f32,
@@ -260,8 +284,9 @@ fn draw_activity_block(img: &mut RgbaImage, row: &Row, width: i32, y: f32, block
         WHITE,
     );
     if !row.time_text.is_empty() {
-        let time_w = text::measure(&row.time_text, TIME_SIZE);
+        let time_w = text::measure(fonts, &row.time_text, TIME_SIZE);
         draw_line_at(
+            fonts,
             img,
             &row.time_text,
             width as f32 - PAD_X as f32 - time_w,
@@ -287,6 +312,7 @@ fn level_color(level: i32) -> draw::Color {
 // ---- 文字排版（top 为文本盒顶, 盒内按行高垂直居中） ----
 
 fn draw_line_left(
+    fonts: &text::Fonts,
     img: &mut RgbaImage,
     s: &str,
     top: f32,
@@ -294,10 +320,13 @@ fn draw_line_left(
     size: f32,
     color: draw::Color,
 ) {
-    draw_line_left_at(img, s, PAD_X as f32, top, box_h as f32, size, color);
+    draw_line_left_at(fonts, img, s, PAD_X as f32, top, box_h as f32, size, color);
 }
 
+// 绘图入参就是目标区域几何 + 字号 + 颜色，加上这一轮的字面天然超 7 个
+#[allow(clippy::too_many_arguments)]
 fn draw_line_left_at(
+    fonts: &text::Fonts,
     img: &mut RgbaImage,
     s: &str,
     x: f32,
@@ -306,10 +335,13 @@ fn draw_line_left_at(
     size: f32,
     color: draw::Color,
 ) {
-    draw_line_at(img, s, x, top, box_h, size, color);
+    draw_line_at(fonts, img, s, x, top, box_h, size, color);
 }
 
+// 同上：区域几何 + 字号 + 颜色，再加这一轮的字面
+#[allow(clippy::too_many_arguments)]
 fn draw_line_right(
+    fonts: &text::Fonts,
     img: &mut RgbaImage,
     s: &str,
     width: i32,
@@ -318,8 +350,9 @@ fn draw_line_right(
     size: f32,
     color: draw::Color,
 ) {
-    let text_w = text::measure(s, size);
+    let text_w = text::measure(fonts, s, size);
     draw_line_at(
+        fonts,
         img,
         s,
         width as f32 - PAD_X as f32 - text_w,
@@ -331,6 +364,7 @@ fn draw_line_right(
 }
 
 fn draw_line_centered(
+    fonts: &text::Fonts,
     img: &mut RgbaImage,
     s: &str,
     top: f32,
@@ -338,8 +372,9 @@ fn draw_line_centered(
     size: f32,
     color: draw::Color,
 ) {
-    let text_w = text::measure(s, size);
+    let text_w = text::measure(fonts, s, size);
     draw_line_at(
+        fonts,
         img,
         s,
         (img.width() as f32 - text_w) / 2.0,
@@ -350,7 +385,10 @@ fn draw_line_centered(
     );
 }
 
+// 同上：落点几何 + 字号 + 颜色，再加这一轮的字面
+#[allow(clippy::too_many_arguments)]
 fn draw_line_at(
+    fonts: &text::Fonts,
     img: &mut RgbaImage,
     s: &str,
     x: f32,
@@ -360,5 +398,5 @@ fn draw_line_at(
     color: draw::Color,
 ) {
     let baseline = top + box_h / 2.0 + size * 0.42;
-    text::draw_line(img, s, x, baseline, size, color);
+    text::draw_line(fonts, img, s, x, baseline, size, color);
 }

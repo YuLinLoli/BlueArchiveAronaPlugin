@@ -58,7 +58,10 @@ fn save_preview(path: &std::path::Path, width: u32) -> std::path::PathBuf {
 #[ignore = "渲染冒烟自检(需系统中文字体), 运行: cargo test render -- --ignored"]
 #[test]
 fn render_probe() {
-    assert!(crate::image::text::available(), "本机未找到可用中文字体");
+    assert!(
+        crate::image::text::acquire().is_some(),
+        "本机未找到可用中文字体"
+    );
     let pair = sample_activities();
     let path = crate::image::activity::render(&pair, ServerLocale::JP).expect("活动图渲染失败");
     println!("activity image: {}", path.display());
@@ -175,7 +178,10 @@ async fn render_gacha_probe() {
 #[ignore = "联网自检, 运行: cargo test refresh_all_images -- --ignored --nocapture --test-threads=1"]
 #[tokio::test]
 async fn refresh_all_images_creates_local_files() {
-    assert!(crate::image::text::available(), "本机未找到可用中文字体");
+    assert!(
+        crate::image::text::acquire().is_some(),
+        "本机未找到可用中文字体"
+    );
     crate::commands::activity::refresh_all_images().await;
     let mut produced = 0;
     for server in ServerLocale::ALL {

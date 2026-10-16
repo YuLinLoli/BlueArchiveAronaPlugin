@@ -54,11 +54,18 @@ pub async fn render_result(report: &DrawReport) -> Result<PathBuf, String> {
         avatars.push(load_avatar(result).await);
     }
     let report = report.clone();
-    crate::image::cpu_bound(move || draw_report(&report, &avatars)).await
+    // 字面只在这一张图的绘制期间存在（口径见 text::acquire 的说明）；
+    // 拿不到就照原来的口径出无文字的图，不因为字体缺而不回图
+    let fonts = text::acquire();
+    crate::image::cpu_bound(move || draw_report(&report, &avatars, fonts.as_deref())).await
 }
 
 /// 纯 CPU 部分：渐变背景 + 卡片网格 + 保底计数块 + PNG 落盘
-fn draw_report(report: &DrawReport, avatars: &[Option<RgbaImage>]) -> Result<PathBuf, String> {
+fn draw_report(
+    report: &DrawReport,
+    avatars: &[Option<RgbaImage>],
+    fonts: Option<&text::Fonts>,
+) -> Result<PathBuf, String> {
     let mut img = RgbaImage::new(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32);
     // 背景: 上(160,213,246) -> 下(250,241,241) 垂直渐变
     draw::fill_rect_vgrad(
@@ -76,9 +83,10 @@ fn draw_report(report: &DrawReport, avatars: &[Option<RgbaImage>]) -> Result<Pat
             index,
             result,
             avatars.get(index).and_then(|it| it.as_ref()),
+            fonts,
         );
     }
-    draw_count_block(&mut img, report.pity_count);
+    draw_count_block(&mut img, report.pity_count, fonts);
     let file = new_result_file();
     img.save(&file)
         .map_err(|err| format!("保存抽卡结果图失败: {err}"))?;
@@ -177,7 +185,13 @@ fn url_extension(url: &str) -> String {
 }
 
 /// 画单张卡片
-fn draw_cell(img: &mut RgbaImage, index: usize, result: &DrawResult, avatar: Option<&RgbaImage>) {
+fn draw_cell(
+    img: &mut RgbaImage,
+    index: usize,
+    result: &DrawResult,
+    avatar: Option<&RgbaImage>,
+    fonts: Option<&text::Fonts>,
+) {
     let col = (index % 5) as i32;
     let row = (index / 5) as i32;
     let x = FIRST_COL + col * COL_STEP;
@@ -210,7 +224,7 @@ fn draw_cell(img: &mut RgbaImage, index: usize, result: &DrawResult, avatar: Opt
                 )
             });
         }
-        None => draw_placeholder(img, result, x, y, avatar_area_w, avatar_area_h),
+        None => draw_placeholder(img, result, x, y, avatar_area_w, avatar_area_h, fonts),
     }
     // 星级底板: 深灰蓝渐变, 位于头像下方
     let plate_y = y + CELL_HEIGHT - STAR_PLATE_HEIGHT;
@@ -261,7 +275,15 @@ fn draw_cell(img: &mut RgbaImage, index: usize, result: &DrawResult, avatar: Opt
 }
 
 /// 无头像占位: 圆角渐变 + 白色 A(彩蛋)/?(普通)
-fn draw_placeholder(img: &mut RgbaImage, result: &DrawResult, x: i32, y: i32, w: i32, h: i32) {
+fn draw_placeholder(
+    img: &mut RgbaImage,
+    result: &DrawResult,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    fonts: Option<&text::Fonts>,
+) {
     draw::fill_rounded_vgrad(
         img,
         x + 8,
@@ -273,13 +295,23 @@ fn draw_placeholder(img: &mut RgbaImage, result: &DrawResult, x: i32, y: i32, w:
         draw::rgb(96, 134, 168),
     );
     let marker = if result.custom { "A" } else { "?" };
-    if text::available() {
-        text::draw_centered(img, marker, x, y, w, h, 100.0, draw::rgb(255, 255, 255));
+    if let Some(fonts) = fonts {
+        text::draw_centered(
+            fonts,
+            img,
+            marker,
+            x,
+            y,
+            w,
+            h,
+            100.0,
+            draw::rgb(255, 255, 255),
+        );
     }
 }
 
 /// 右下角保底计数块: 青色渐变圆角块 + "{pity}抽"
-fn draw_count_block(img: &mut RgbaImage, pity_count: i64) {
+fn draw_count_block(img: &mut RgbaImage, pity_count: i64, fonts: Option<&text::Fonts>) {
     draw::fill_rounded_vgrad(
         img,
         COUNT_X,
@@ -300,8 +332,9 @@ fn draw_count_block(img: &mut RgbaImage, pity_count: i64) {
         30,
         draw::rgba(255, 255, 255, 56),
     );
-    if text::available() {
+    if let Some(fonts) = fonts {
         text::draw_centered(
+            fonts,
             img,
             &format!("{pity_count}抽"),
             COUNT_X,
