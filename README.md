@@ -47,8 +47,8 @@
 3. 启动框架。日志里应该有握手通过与装载成功两行，GUI 的「插件管理」页同时就能看到它：
 
    ```
-   [Arona] 插件 ABI 握手通过: 布局 8，契约 1.0.0
-   [Arona] 已装载动态插件: BluearchivePlugin 0.4.1 (bluearchive_plugin.dll)
+   [Arona] 插件 ABI 握手通过: 布局 9，契约 1.0.0
+   [Arona] 已装载动态插件: BluearchivePlugin 0.4.2 (bluearchive_plugin.dll)
    ```
 
 装好后配置与数据都落在框架的运行目录里，本仓库不需要也不应该提交它们：
@@ -93,7 +93,7 @@ cargo clippy --all-targets
 发布口径是 git 标签或 crates.io 依赖（`arona = { package = "arona-rs", version = "1.1.0", … }`）——
 接口需求已经跨过了已发布的标签：符号布局 5 那批（`Bot`/`Group`/`Member` 对象模型、聊天记录库
 走宿主侧 trait 出口、`Image` 句柄）不在已推送的 `v1.0.0` 里，符号布局 6 起定时任务改走宿主通道
-（`framework.jobs()`）本地 `v1.1.0` 标签（布局 5）也还没有，而框架 HEAD 已经抬到布局 8，所以这里
+（`framework.jobs()`）本地 `v1.1.0` 标签（布局 5）也还没有，而框架 HEAD 已经抬到布局 9，所以这里
 先停在 path。
 要把这个仓库发给别人用时，换成 git 标签或 crates.io 依赖再提交 —— 注释里写着具体那一行。
 
