@@ -643,8 +643,17 @@ mod tests {
         );
         let file = framework.configs().config_file(crate::PLUGIN_ID);
         std::fs::create_dir_all(file.parent().expect("插件配置目录")).unwrap();
+        // 落盘必须**原子**：`config/<id>/arona.yml` 这一条路径被本模块好几个用例共用，
+        // 而 `init()` 是「现读盘、解析失败就退默认配置」。直接 `fs::write` 会先截断再写，
+        // 并行的另一个用例正好在这条缝里 `init()`，读到半份/空文件 —— 解析失败退成默认值，
+        // `black_groups` 随之消失，`alert_texts_go_to_allowed_groups` 就会报
+        // 「预警发送到了黑名单群」。Windows 上没撞上只是调度运气，Linux runner 上实测撞上了。
+        // 改成「先写各自的临时文件再 rename」（POSIX 与 Windows 上都是替换语义；
+        // Rust 的 File::open 带 FILE_SHARE_DELETE，替换不会被读句柄挡住），
+        // 读的人只可能看到上一份完整的或这一份完整的，用例之间照旧真并行、不必抢串行锁。
+        let staging = file.with_extension(format!("yml.{}", uuid::Uuid::new_v4()));
         std::fs::write(
-            &file,
+            &staging,
             "notify:\n\
              \x20 enable: true\n\
              \x20 every_day_hour: 8\n\
@@ -655,6 +664,7 @@ mod tests {
              \x20 notify_text: \"碧蓝档案预警\"\n",
         )
         .unwrap();
+        std::fs::rename(&staging, &file).unwrap();
         framework.configs().init();
         framework.gating().set_groups(vec![910001, 910002]);
         let sender = Arc::new(CaptureSender::new());
