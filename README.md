@@ -32,7 +32,9 @@
    ```bash
    git clone https://github.com/YuLinLoli/BlueArchiveAronaPlugin
    cd BlueArchiveAronaPlugin
-   cargo build --release                 # 产物 target\release\bluearchive_plugin.dll
+   cargo build --release                 # Windows：target\release\bluearchive_plugin.dll
+   # Linux：cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
+   #        产物 target/x86_64-unknown-linux-gnu/release/libbluearchive_plugin.so
    ```
 
 2. 把 dll 放进框架的运行目录，每个插件独占一层以 id 命名的子目录（推荐，方便另放资源）：
@@ -48,8 +50,10 @@
 
    ```
    [Arona] 插件 ABI 握手通过: 布局 10，契约 1.0.0
-   [Arona] 已装载动态插件: BluearchivePlugin 0.4.3 (bluearchive_plugin.dll)
+   [Arona] 已装载动态插件: BluearchivePlugin 0.4.5 (bluearchive_plugin.dll)
    ```
+
+   Linux 上同一行的文件名是 `libbluearchive_plugin.so`。
 
 装好后配置与数据都落在框架的运行目录里，本仓库不需要也不应该提交它们：
 
@@ -73,9 +77,9 @@ dll 与宿主跑在同一个进程里，而 `arona` 是被静态链接进 dll �
 | --- | --- |
 | `arona` 版本 + 除 `gui`/`default` 外的 feature 集合 | 依赖写 `package = "arona-rs", version = "1.1.0"`，且 `default-features = false`（不替宿主决定 GUI）。框架在 crates.io 上的发布名带 `-rs`，库名仍是 `arona`，所以 `use arona::…` 不用改 |
 | rustc 版本（`rustc -vV` 的 release 行） | 钉在仓库根的 `rust-toolchain.toml`，`cargo build` 自动选中它；要和宿主对上就得和框架仓库那一行**逐字相同** |
-| 目标三元组 | `x86_64-pc-windows-msvc` |
+| 目标三元组 | Windows 是 `x86_64-pc-windows-msvc`，Linux 是 `x86_64-unknown-linux-gnu`——**两平台的产物不能互换**，把 dll 改名叫 `.so` 会被当场拒载 |
 | profile | 宿主是 release，插件也必须 `--release` |
-| CRT 链接方式 | `.cargo/config.toml` 里已写 `-C target-feature=+crt-static`，与框架仓库一致 |
+| CRT 链接方式 | `.cargo/config.toml` 里已写 `-C target-feature=+crt-static`，与框架仓库一致，且**只对 MSVC 目标生效**。Linux 不静态链接运行库：musl 静态下 `dlopen` 是空桩，静态化了插件反而装不进去。CI 另用 `cargo zigbuild` 把 glibc 钉在 2.17，于是框架的标准包与 compat 包宿主装的是同一份 `.so` |
 
 一句话：**谁编的 `arona-rs.exe`，就用同一套工具链编这个 dll**。rustc 版本这一项不再靠自觉，
 两个仓库各持一份同版本的 `rust-toolchain.toml`；框架那边升版本，这里必须跟着改并重编，
