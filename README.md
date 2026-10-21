@@ -49,8 +49,8 @@
 3. 启动框架。日志里应该有握手通过与装载成功两行，GUI 的「插件管理」页同时就能看到它：
 
    ```
-   [Arona] 插件 ABI 握手通过: 布局 10，契约 1.0.0
-   [Arona] 已装载动态插件: BluearchivePlugin 0.4.5 (bluearchive_plugin.dll)
+   [Arona] 插件 ABI 握手通过: 布局 10
+   [Arona] 已装载动态插件: BluearchivePlugin 0.4.6 (bluearchive_plugin.dll)
    ```
 
    Linux 上同一行的文件名是 `libbluearchive_plugin.so`。
@@ -75,15 +75,18 @@ dll 与宿主跑在同一个进程里，而 `arona` 是被静态链接进 dll �
 
 | 项 | 本仓库怎么对齐 |
 | --- | --- |
-| `arona` 版本 + 除 `gui`/`default` 外的 feature 集合 | 依赖写 `package = "arona-rs", version = "1.1.0"`，且 `default-features = false`（不替宿主决定 GUI）。框架在 crates.io 上的发布名带 `-rs`，库名仍是 `arona`，所以 `use arona::…` 不用改 |
+| 除 `gui`/`default` 外的 feature 集合 | 依赖写 `package = "arona-rs", version = "1.1.0"`，且 `default-features = false`（不替宿主决定 GUI）。框架在 crates.io 上的发布名带 `-rs`，库名仍是 `arona`，所以 `use arona::…` 不用改。**crate 版本本身自框架 1.2.1 起不再进指纹**，只靠布局号与这几项把关 |
 | rustc 版本（`rustc -vV` 的 release 行） | 钉在仓库根的 `rust-toolchain.toml`，`cargo build` 自动选中它；要和宿主对上就得和框架仓库那一行**逐字相同** |
 | 目标三元组 | Windows 是 `x86_64-pc-windows-msvc`，Linux 是 `x86_64-unknown-linux-gnu`——**两平台的产物不能互换**，把 dll 改名叫 `.so` 会被当场拒载 |
 | profile | 宿主是 release，插件也必须 `--release` |
 | CRT 链接方式 | `.cargo/config.toml` 里已写 `-C target-feature=+crt-static`，与框架仓库一致，且**只对 MSVC 目标生效**。Linux 不静态链接运行库：musl 静态下 `dlopen` 是空桩，静态化了插件反而装不进去。CI 另用 `cargo zigbuild` 把 glibc 钉在 2.17，于是框架的标准包与 compat 包宿主装的是同一份 `.so` |
 
 一句话：**谁编的 `arona-rs.exe`，就用同一套工具链编这个 dll**。rustc 版本这一项不再靠自觉，
-两个仓库各持一份同版本的 `rust-toolchain.toml`；框架那边升版本，这里必须跟着改并重编，
-否则老 dll 会全部拒载。更细的规矩（含拒载日志对照表）写在框架仓库的 `PLUGIN_DEVELOPMENT.md`。
+两个仓库各持一份同版本的 `rust-toolchain.toml`。框架 1.2.1 起握手只比布局号 + 工具链指纹，
+所以「框架升版本」本身不再自动让老 dll 失效；但只要指纹里任何一段变了（rustc、target、
+profile、crt-static、feature 集合），或布局号抬了，就必须重编。1.2.0 及更早编的插件在 1.2.1
+宿主上正属于这一类：指纹串去掉了 `arona/<版本>` 前缀，而比对是全等，于是必然对不上。
+更细的规矩（含拒载日志对照表）写在框架仓库的 `PLUGIN_DEVELOPMENT.md`。
 
 ## 本地开发
 
@@ -145,7 +148,7 @@ cargo clippy --all-targets
 
 ## 与框架的版本关系
 
-本仓库按 `arona-rs 1.1.0`（符号布局 10、契约 1.0.0）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
-`PluginContext` 运行期能力）。契约允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
+本仓库按 `arona-rs 1.2.1`（符号布局 10）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
+`PluginContext` 运行期能力）。接口允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
 提交里把示例插件（框架仓库的 `plugins/hello`）改到能编译，本仓库跟着同步一次。升级框架后
 重新 `cargo build --release` 就行——真混了版本，握手会在装载那一步替你挡下来。
