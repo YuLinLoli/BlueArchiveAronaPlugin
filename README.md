@@ -50,7 +50,7 @@
 
    ```
    [Arona] 插件 ABI 握手通过: 布局 10
-   [Arona] 已装载动态插件: BluearchivePlugin 0.4.6 (bluearchive_plugin.dll)
+   [Arona] 已装载动态插件: BluearchivePlugin 0.4.7 (bluearchive_plugin.dll)
    ```
 
    Linux 上同一行的文件名是 `libbluearchive_plugin.so`。
@@ -148,7 +148,7 @@ cargo clippy --all-targets
 
 ## 与框架的版本关系
 
-本仓库按 `arona-rs 1.2.1`（符号布局 10）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
+本仓库按 `arona-rs 1.2.2`（符号布局 10）的插件接口开发（`AronaPlugin` 四阶段装配、`PluginRegistrar` 登记、
 `PluginContext` 运行期能力）。接口允许破坏性演进、不留兼容层：每次动接口，框架侧会在同一个
 提交里把示例插件（框架仓库的 `plugins/hello`）改到能编译，本仓库跟着同步一次。升级框架后
 重新 `cargo build --release` 就行——真混了版本，握手会在装载那一步替你挡下来。
