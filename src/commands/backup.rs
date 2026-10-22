@@ -239,7 +239,12 @@ fn extract(zip_file: &Path, target: &Path) -> Result<Vec<String>, String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|err| format!("读取备份条目失败: {err}"))?;
-        let name = entry.name().to_string();
+        // zip 9 起 name() 会校验条目名并按 Result 返回；非法条目在这里就报错，
+        // 而不是像旧版那样先拿一个待校验的字符串、再靠 enclosed_name() 兜底。
+        let name = entry
+            .name()
+            .map_err(|err| format!("非法的备份条目名: {err}"))?
+            .to_string();
         let Some(enclosed) = entry.enclosed_name() else {
             return Err(format!("非法的备份条目: {name}"));
         };
