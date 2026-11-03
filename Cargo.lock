@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "arona-rs"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "ab_glyph",
  "axum",
