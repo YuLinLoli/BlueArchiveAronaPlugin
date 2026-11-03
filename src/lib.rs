@@ -41,6 +41,23 @@ mod ten_pull_test;
 #[cfg(test)]
 mod trainer_test;
 
+/// 测试专用串行锁：凡是建框架、碰 `config/bluearchive/arona.yml` 的用例先拿它。
+///
+/// 配置根目录是**进程当前工作目录**（框架 `paths::root()` 就是 CWD），整个测试二进制里
+/// 所有并行用例共享同一份文件。CI 是全新环境：第一个 `configs().init()` 走「文件不存在」
+/// 分支，用框架的 `write_file`（普通 `fs::write`，非原子）写默认模板；并行的其他用例
+/// 的 `init()` 正好在这一瞬读盘，读到半个/空文件 → 解析退默认 → `black_groups` 消失
+/// → `targets_drop_blacklisted_groups` 在 Linux runner 上挂掉（v0.4.11 实测）。
+/// 本地从未复现是因为盘上早有残留文件，`!existed` 分支走不到。
+/// 框架侧的原子写修复要等框架发版，先用这把锁把涉事用例串行，代价只是它们快不到哪里去。
+#[cfg(test)]
+pub(crate) fn config_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 use arona::plugin::{AronaPlugin, PluginContext, PluginMeta, PluginRegistrar};
 use arona::runtime::config::Feature;
 use std::path::PathBuf;

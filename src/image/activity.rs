@@ -344,17 +344,57 @@ pub fn render(
     }
     img.save(&file)
         .map_err(|err| format!("保存活动图片失败: {err}"))?;
+    cleanup_stale_images(server, &file);
     Ok(file)
 }
 
-/// 本地活动日历图路径: data/bluearchive/image/activity/activity-<服务>.png
-pub fn image_path(server: ServerLocale) -> PathBuf {
-    crate::image_dir()
-        .join("activity")
-        .join(format!("activity-{}.png", server.command_name()))
+/// 清掉旧版本命名的历史图。
+///
+/// 路径里编进了插件版本（见 [`image_path`]）：升级后 `cached_image` 按新版本找文件，
+/// 旧图命不中——这正是「改了渲染用户却看不到新图」的解法（v0.4.10→v0.4.11 用户实测踩过：
+/// 命令层优先发盘上已有的图，旧图不删就永远是它）。清掉旧版文件，纯粹是不让 `data/` 攒垃圾。
+/// 只删「本服务器前缀 + .png 结尾 + 不等于当前文件」的，别的服务器互不相干。
+fn cleanup_stale_images(server: ServerLocale, keep: &std::path::Path) {
+    let Some(dir) = keep.parent() else {
+        return;
+    };
+    let keep_name = keep
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let prefix = format!("activity-{}", server.command_name());
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name == keep_name {
+                continue;
+            }
+            if name.starts_with(&prefix) && name.ends_with(".png") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
-/// 本地已刷新好的活动日历图: 存在即直接复用(命令层不再重新渲染), 不存在返回 None
+/// 本地活动日历图路径: `data/bluearchive/image/activity/activity-<服务>-v<插件版本>.png`。
+///
+/// 文件名带版本是**故意的**：命令层（`commands/activity`）对盘上已有的图直接复用、
+/// 不重渲染，由每日定时任务刷新。渲染代码一旦改动，同名的旧图就成了「改了也白改」
+/// 的死缓存——版本进了文件名，升级即失效，旧文件由 [`cleanup_stale_images`] 收走。
+pub fn image_path(server: ServerLocale) -> PathBuf {
+    crate::image_dir().join("activity").join(format!(
+        "activity-{}-v{}.png",
+        server.command_name(),
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// 本地已刷新好的活动日历图: 存在即直接复用(命令层不再重新渲染), 不存在返回 None。
+/// 文件名带插件版本, 升级后旧图天然命不中(见 [`image_path`] 的说明)。
 pub fn cached_image(server: ServerLocale) -> Option<PathBuf> {
     let file = image_path(server);
     file.exists().then_some(file)

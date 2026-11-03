@@ -643,14 +643,15 @@ mod tests {
         );
         let file = framework.configs().config_file(crate::PLUGIN_ID);
         std::fs::create_dir_all(file.parent().expect("插件配置目录")).unwrap();
-        // 落盘必须**原子**：`config/<id>/arona.yml` 这一条路径被本模块好几个用例共用，
-        // 而 `init()` 是「现读盘、解析失败就退默认配置」。直接 `fs::write` 会先截断再写，
+        // 落盘必须**原子**：`config/<id>/arona.yml` 这一条路径被本模块好几个用例共用
+        // （配置根目录是进程 CWD，见 [`crate::config_test_lock`] 的说明），而 `init()`
+        // 是「现读盘、解析失败就退默认配置」。直接 `fs::write` 会先截断再写，
         // 并行的另一个用例正好在这条缝里 `init()`，读到半份/空文件 —— 解析失败退成默认值，
-        // `black_groups` 随之消失，`alert_texts_go_to_allowed_groups` 就会报
-        // 「预警发送到了黑名单群」。Windows 上没撞上只是调度运气，Linux runner 上实测撞上了。
-        // 改成「先写各自的临时文件再 rename」（POSIX 与 Windows 上都是替换语义；
-        // Rust 的 File::open 带 FILE_SHARE_DELETE，替换不会被读句柄挡住），
-        // 读的人只可能看到上一份完整的或这一份完整的，用例之间照旧真并行、不必抢串行锁。
+        // `black_groups` 随之消失，用例就会报「黑名单群没被排除」。
+        // 这里改成「先写临时文件再 rename」（POSIX 与 Windows 上都是替换语义）。
+        // 但这只封住了本函数自己的写窗口：框架 `init()` 的模板写回同样是普通 `fs::write`，
+        // CI 全新环境第一跑必走那条路——所以用例之间还是要靠 [`crate::config_test_lock`]
+        // 串行，原子写只是把窗口缩小、把「读到半份」换成了「读到上一份完整的」。
         let staging = file.with_extension(format!("yml.{}", uuid::Uuid::new_v4()));
         std::fs::write(
             &staging,
@@ -766,6 +767,7 @@ mod tests {
     /// 推送目标: 全局允许名单去掉黑名单
     #[test]
     fn targets_drop_blacklisted_groups() {
+        let _config_guard = crate::config_test_lock();
         let (framework, _sender) = isolated();
         let config = config::notify(&framework);
         assert_eq!(
@@ -778,6 +780,7 @@ mod tests {
     /// 发送侧: 三种文案与目标群（含黑名单、维护单列）
     #[tokio::test]
     async fn alert_texts_go_to_allowed_groups() {
+        let _config_guard = crate::config_test_lock();
         let (framework, sender) = isolated();
         let now = chrono::Utc::now().timestamp_millis();
 
@@ -849,6 +852,7 @@ mod tests {
     /// 每日推送整点触发，启动初始化任务不重建
     #[tokio::test]
     async fn jobs_dedup_and_fire_at_planned_time() {
+        let _config_guard = crate::config_test_lock();
         let (framework, _sender) = isolated();
         let jobs = framework.jobs();
         let now = chrono::Utc::now().timestamp_millis();
@@ -941,6 +945,7 @@ mod tests {
     #[ignore = "联网自检, 运行: cargo test notify_daily -- --ignored --nocapture --test-threads=1"]
     #[tokio::test]
     async fn notify_daily_push_network() {
+        let _config_guard = crate::config_test_lock();
         let (framework, sender) = isolated();
         let config = config::notify(&framework);
         let targets = resolve_targets(&config, framework.gating().groups());
