@@ -17,6 +17,16 @@ fn count_color(img: &RgbaImage, r: u8, g: u8, b: u8, tol: u8) -> usize {
     count
 }
 
+/// 从上往下找第一条含该颜色的扫描行，用来断言"谁排在谁上面"
+fn top_y_of(img: &RgbaImage, r: u8, g: u8, b: u8, tol: u8) -> Option<u32> {
+    (0..img.height()).find(|&y| {
+        (0..img.width()).any(|x| {
+            let [pr, pg, pb, _] = img.get_pixel(x, y).0;
+            pr.abs_diff(r) <= tol && pg.abs_diff(g) <= tol && pb.abs_diff(b) <= tol
+        })
+    })
+}
+
 fn sample_activities() -> (Vec<Activity>, Vec<Activity>) {
     let now = chrono::Utc::now().timestamp_millis();
     let mut active = Vec::new();
@@ -27,7 +37,7 @@ fn sample_activities() -> (Vec<Activity>, Vec<Activity>) {
         ("学院交流会 3rd", ActivityType::CollegeExchangeDrop, true),
         ("特殊任务 经验值2倍", ActivityType::SpecialDrop, true),
         ("常规维护", ActivityType::Maintenance, false),
-        ("生日: 砂狼シロコ", ActivityType::Birthday, true),
+        ("砂狼シロコ的生日", ActivityType::Birthday, true),
         ("PickUp: 星野(水着)", ActivityType::PickUp, false),
     ];
     for (index, (name, kind, is_active)) in specs.iter().enumerate() {
@@ -73,7 +83,7 @@ fn render_probe() {
         count_color(&img, 255, 255, 255, 0) > 40_000,
         "活动图背景应为白色"
     );
-    // 分组色块: 蓝(决战 level3) / 紫(普通活动 level2) / 橙(掉落 level1) / 绿(生日 level5)
+    // 分组色块: 蓝(决战 level3) / 紫(普通活动 level2) / 橙(掉落 level1)
     assert!(
         count_color(&img, 16, 126, 247, 12) > 1_000,
         "缺少蓝色决战色块"
@@ -86,9 +96,17 @@ fn render_probe() {
         count_color(&img, 255, 140, 0, 12) > 1_000,
         "缺少橙色掉落色块"
     );
+    // 生日有自己的一档颜色（粉），不再和活动共用绿色
     assert!(
-        count_color(&img, 103, 194, 58, 12) > 1_000,
-        "缺少绿色生日色块"
+        count_color(&img, 255, 122, 168, 12) > 1_000,
+        "缺少粉色生日色块"
+    );
+    // 生日必须排在活动**上面**：这一条是这次改动的主诉求
+    let birthday_top = top_y_of(&img, 255, 122, 168, 12).expect("没找到生日色块");
+    let battle_top = top_y_of(&img, 16, 126, 247, 12).expect("没找到决战色块");
+    assert!(
+        birthday_top < battle_top,
+        "生日没置顶：生日 y={birthday_top}，决战 y={battle_top}"
     );
     // 红(维护)在即将开始分组
     assert!(

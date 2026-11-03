@@ -7,7 +7,7 @@
 //! 5 分钟的定时任务刷新(见 commands::activity), /活动 命中本地图片时直接发送。
 
 use crate::data::activity::type_level;
-use crate::entity::{Activity, ServerLocale};
+use crate::entity::{Activity, ActivityType, ServerLocale};
 use crate::image::draw;
 use crate::image::text;
 use crate::util::time::translate_readable_time;
@@ -47,6 +47,21 @@ pub fn render(
     let mut pending = pending.clone();
     active.sort_by_key(|a| a.end_time);
     pending.sort_by_key(|a| a.start_time);
+
+    // 生日单独摘出来置顶。它们的类型本来就是独立的 `Birthday`，但一直混在「即将开始」
+    // 里，被一堆普通活动埋掉——用户要的是「生日在最上面、活动在下面」。
+    // 两批都收：窗口是未来一周，生日只会落在 pending 里，但真跨到 active 也不能漏。
+    let (mut birthdays, active): (Vec<Activity>, Vec<Activity>) = active
+        .into_iter()
+        .partition(|activity| activity.activity_type == ActivityType::Birthday);
+    let (pending_birthdays, pending): (Vec<Activity>, Vec<Activity>) = pending
+        .into_iter()
+        .partition(|activity| activity.activity_type == ActivityType::Birthday);
+    birthdays.extend(pending_birthdays);
+    birthdays.sort_by_key(|activity| activity.start_time);
+
+    // 没生日就整节不画：硬摆一行「学生生日 / 无」比不画更难看
+    let birthday_rows = collect_birthday_rows(&birthdays);
     let active_rows = collect_rows(&active, false);
     let pending_rows = collect_rows(&pending, true);
 
@@ -67,7 +82,7 @@ pub fn render(
     let mut height = PAD_Y;
     height += line_box(&fonts, TITLE_SIZE);
     height += line_box(&fonts, DATE_SIZE) + 10;
-    height += draw_sections_preview(&fonts, &active_rows, &pending_rows, width);
+    height += draw_sections_preview(&fonts, &birthday_rows, &active_rows, &pending_rows, width);
     height += line_box(&fonts, FOOTER_SIZE) + PAD_Y;
 
     let mut img = RgbaImage::new(width as u32, height.max(120) as u32);
@@ -82,6 +97,10 @@ pub fn render(
     let date_h = line_box(&fonts, DATE_SIZE);
     draw_line_right(&fonts, &mut img, &date, width, y, date_h, DATE_SIZE, GRAY);
     y += date_h as f32 + 10.0;
+    // 学生生日（置顶）：这一节是用户明确要的「生日在最上面」
+    if !birthday_rows.is_empty() {
+        y = draw_section_rows(&fonts, &mut img, y, width, "学生生日", &birthday_rows);
+    }
     // 正在进行
     y = draw_section_rows(&fonts, &mut img, y, width, "正在进行", &active_rows);
     // 即将开始
@@ -121,6 +140,8 @@ struct Row {
     content: String,
     time_text: String,
     level: i32,
+    /// 指定底色（生日用它的粉）；`None` 时按 `level` 从活动色板取
+    color: Option<draw::Color>,
 }
 
 impl Row {
@@ -146,6 +167,7 @@ fn collect_rows(activities: &[Activity], future: bool) -> Vec<Row> {
             content: "无".to_string(),
             time_text: String::new(),
             level: 1,
+            color: None,
         }];
     }
     activities
@@ -160,6 +182,40 @@ fn collect_rows(activities: &[Activity], future: bool) -> Vec<Row> {
                 content: activity.content.clone(),
                 time_text: translate_readable_time(ts, future),
                 level: type_level(activity.activity_type),
+                color: None,
+            }
+        })
+        .collect()
+}
+
+/// 生日的底色：和活动那五档（橙/紫/蓝/红/绿）分开，一眼能看出"这条不是活动"
+const BIRTHDAY_COLOR: draw::Color = [255, 122, 168, 255];
+
+/// 生日行：右侧写具体日期（11/05）而不是「明天」——生日问的是哪一天，
+/// 不是还剩几个小时，相对时间在这里反而要多想一步。
+///
+/// 名字去掉「的生日」后缀：这一节标题已经写着「学生生日」，每条再重复一遍就只是噪音。
+fn collect_birthday_rows(birthdays: &[Activity]) -> Vec<Row> {
+    use chrono::{Datelike, TimeZone};
+    birthdays
+        .iter()
+        .map(|activity| {
+            let date = chrono::Local
+                .timestamp_millis_opt(activity.start_time)
+                .single();
+            let time_text = date
+                .map(|date| format!("{:02}/{:02}", date.month(), date.day()))
+                .unwrap_or_default();
+            let content = activity
+                .content
+                .strip_suffix("的生日")
+                .unwrap_or(&activity.content)
+                .to_string();
+            Row {
+                content,
+                time_text,
+                level: type_level(activity.activity_type),
+                color: Some(BIRTHDAY_COLOR),
             }
         })
         .collect()
@@ -173,16 +229,23 @@ fn line_box(fonts: &text::Fonts, size: f32) -> i32 {
     line.ceil() as i32
 }
 
-/// 预览高度: 两个分组标题 + 所有活动行盒高之和
+/// 预览高度: 各分组标题 + 所有行盒高之和
 fn draw_sections_preview(
     fonts: &text::Fonts,
+    birthday_rows: &[Row],
     active_rows: &[Row],
     pending_rows: &[Row],
     width: i32,
 ) -> i32 {
     let section_h = line_box(fonts, SECTION_SIZE) + 12;
-    let mut total = section_h * 2;
-    for rows in [active_rows, pending_rows] {
+    let mut total = 0;
+    // 只有生日那一节可能为空（没生日就不画），活动两节空时 collect_rows 会给一行「无」，
+    // 标题照旧要留位置——这里按「rows 为空才跳过标题」处理，两种情况都对
+    for rows in [birthday_rows, active_rows, pending_rows] {
+        if rows.is_empty() {
+            continue;
+        }
+        total += section_h;
         for row in rows {
             let _ = width;
             total += row.box_height(fonts) + 8;
@@ -267,7 +330,7 @@ fn draw_activity_block(
         width - (PAD_X - 10) * 2,
         block_h,
         22,
-        level_color(row.level),
+        row.color.unwrap_or_else(|| level_color(row.level)),
     );
     let box_top = y
         + (block_h as f32 - line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE)) as f32)
