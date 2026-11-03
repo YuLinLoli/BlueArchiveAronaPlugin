@@ -17,12 +17,15 @@ fn count_color(img: &RgbaImage, r: u8, g: u8, b: u8, tol: u8) -> usize {
     count
 }
 
-/// 从上往下找第一条含该颜色的扫描行，用来断言"谁排在谁上面"
-fn top_y_of(img: &RgbaImage, r: u8, g: u8, b: u8, tol: u8) -> Option<u32> {
-    (0..img.height()).find(|&y| {
-        (0..img.width()).any(|x| {
-            let [pr, pg, pb, _] = img.get_pixel(x, y).0;
-            pr.abs_diff(r) <= tol && pg.abs_diff(g) <= tol && pb.abs_diff(b) <= tol
+/// 某块区域里有没有深色像素（用来确认格子里真的画了日期数字）
+fn has_ink(img: &RgbaImage, x0: u32, y0: u32, w: u32, h: u32) -> bool {
+    (y0..(y0 + h).min(img.height())).any(|y| {
+        (x0..(x0 + w).min(img.width())).any(|x| {
+            let [r, g, b, _] = img.get_pixel(x, y).0;
+            // 工作日的日期是深色，今天那一格是粉色，两种都算「有字」
+            let dark = r < 120 && g < 120 && b < 130;
+            let pink = r > 200 && g < 170 && (120..210).contains(&b);
+            dark || pink
         })
     })
 }
@@ -146,6 +149,17 @@ fn render_probe() {
     assert!(count_color(&img, 255, 140, 0, 12) > 200, "缺少橙色活动标记");
     // 深色标题文字存在
     assert!(count_color(&img, 40, 44, 52, 20) > 200, "缺少标题文字");
+    // 7 个格子里都得有日期数字：居中公式写过一次 (`(x+cell_w)/2 + x`)，越靠右偏得越多，
+    // 后面几格的数字直接被画出画布——这一条就是那次事故的闸
+    let cell_w = (1400 - 44 * 2) / 7;
+    for index in 0..7u32 {
+        let x0 = (44 + index as i32 * cell_w + 40) as u32;
+        assert!(
+            has_ink(&img, x0, 158, 100, 60),
+            "第 {} 个格子里没有日期数字",
+            index + 1
+        );
+    }
 }
 
 #[ignore = "渲染冒烟自检(需系统中文字体), 运行: cargo test render -- --ignored"]

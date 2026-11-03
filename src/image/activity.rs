@@ -108,13 +108,13 @@ pub fn render(
         bucket.sort_by_key(|activity| activity.start_time);
     }
 
-    // 生日也按天归位（格子上那个粉点）
-    let mut birthday_days: Vec<bool> = vec![false; DAYS];
+    // 生日也按天归位：格子里要写出名字，不只是点个粉点
+    let mut birthday_items: Vec<Vec<&Activity>> = vec![Vec::new(); DAYS];
     for activity in &birthdays {
         if let Some(day) = local_date(activity.start_time)
             && let Some(index) = days.iter().position(|candidate| *candidate == day)
         {
-            birthday_days[index] = true;
+            birthday_items[index].push(activity);
         }
     }
 
@@ -135,7 +135,11 @@ pub fn render(
     // ---------- 版面 ----------
     let cell_w = (W - PAD * 2) / DAYS as i32;
     // 基础高度按 3 个活动预留；超出多少个就加多少格
-    let busiest = per_day.iter().map(Vec::len).max().unwrap_or(0);
+    // 生日也占格子里的位置，算高度时一起数
+    let busiest = (0..DAYS)
+        .map(|index| per_day[index].len() + birthday_items[index].len())
+        .max()
+        .unwrap_or(0);
     let shown = busiest.min(MAX_ITEMS);
     let extra = shown.saturating_sub(BASE_SLOTS) as i32;
     let cell_h = 92 + BASE_SLOTS as i32 * SLOT_H + extra * SLOT_H + 12;
@@ -205,11 +209,12 @@ pub fn render(
         let date_text = format!("{:02}", day.day());
         let date_color = if is_today { PINK } else { INK };
         let date_w = text::measure(&fonts, &date_text, S_DAY);
+        let center_x = x as f32 + (cell_w - 6) as f32 / 2.0;
         draw_text(
             &fonts,
             &mut img,
             &date_text,
-            (x + cell_w - 6) as f32 / 2.0 + x as f32 - date_w / 2.0,
+            center_x - date_w / 2.0,
             (grid_top + 12) as f32,
             S_DAY,
             date_color,
@@ -224,19 +229,15 @@ pub fn render(
             &fonts,
             &mut img,
             &week,
-            (x + cell_w - 6) as f32 / 2.0 + x as f32 - week_w / 2.0,
+            center_x - week_w / 2.0,
             (grid_top + 48) as f32,
             S_WEEK,
             SUB,
         );
 
-        // 生日：左上角一个粉点
-        if birthday_days[index] {
-            draw::fill_rounded(&mut img, x + 12, grid_top + 72, 9, 9, 5, PINK);
-        }
-
-        // 当天开始的活动
-        let items = &per_day[index];
+        // 当天：生日排在最前（粉色），后面才是当天开始的活动
+        let mut items: Vec<&Activity> = birthday_items[index].clone();
+        items.extend(per_day[index].iter().copied());
         let mut y = grid_top + 88;
         for activity in items.iter().take(MAX_ITEMS) {
             y += draw_tag(&fonts, &mut img, x, y, cell_w - 6, activity);
@@ -441,9 +442,20 @@ fn draw_tag(
     activity: &Activity,
 ) -> i32 {
     let max_w = (cell_w - 44) as f32;
-    let lines = wrap2(fonts, &activity.content, S_TAG, max_w);
+    // 生日用粉、文字去掉「的生日」后缀——格子里寸土寸金，标题那一节已经说了是生日
+    let is_birthday = activity.activity_type == ActivityType::Birthday;
+    let accent = if is_birthday {
+        PINK
+    } else {
+        level_color(type_level(activity.activity_type))
+    };
+    let label = if is_birthday {
+        strip_birthday_suffix(&activity.content)
+    } else {
+        activity.content.as_str()
+    };
+    let lines = wrap2(fonts, label, S_TAG, max_w);
     let block_h = lines.len() as i32 * TAG_LINE + 6;
-    let accent = level_color(type_level(activity.activity_type));
     // 底用类型色的浅版：白底在渐变背景上分不出类型，一眼扫过去全是白块
     let tint = draw::lerp(accent, WHITE, 0.78);
     draw::fill_rounded(img, x + 7, y, cell_w - 19, block_h, 6, tint);
