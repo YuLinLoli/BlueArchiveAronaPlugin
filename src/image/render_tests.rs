@@ -41,8 +41,13 @@ fn sample_activities() -> (Vec<Activity>, Vec<Activity>) {
         ("PickUp: 星野(水着)", ActivityType::PickUp, false),
     ];
     for (index, (name, kind, is_active)) in specs.iter().enumerate() {
-        let start = now - 86_400_000 * (index as i64 % 3);
-        let end = now + 86_400_000 * (index as i64 + 2);
+        // 即将开始的排到未来几天：网格只挂「当天开始」的活动，全塞在过去就测不到标签
+        let start = if *is_active {
+            now - 86_400_000 * (index as i64 % 3)
+        } else {
+            now + 86_400_000 * (index as i64 + 1)
+        };
+        let end = start + 86_400_000 * 4;
         let activity = Activity::new(name.to_string(), ServerLocale::JP, start, end, *kind);
         if *is_active {
             active.push(activity);
@@ -65,6 +70,47 @@ fn save_preview(path: &std::path::Path, width: u32) -> std::path::PathBuf {
     preview
 }
 
+#[ignore = "渲染压测(需系统中文字体), 运行: cargo test render_stress -- --ignored --nocapture"]
+#[test]
+fn render_stress_probe() {
+    assert!(
+        crate::image::text::acquire().is_some(),
+        "本机未找到可用中文字体"
+    );
+    // 同一天塞 5 个活动：格子高度必须按「超出 3 个就加高」自己长上去，
+    // 标签也不能被裁出格子（用户报过的「塞不下」就是这一档）
+    let now = chrono::Utc::now().timestamp_millis();
+    let day = now + 86_400_000 * 2;
+    let specs = [
+        ("【特别委托】道具掉落量3倍", ActivityType::SpecialDrop),
+        ("佩洛洛斯拉 • 野外战", ActivityType::DecisiveBattle),
+        (
+            "我等乃神秘学研究会！~学院之谜与古老咒文~",
+            ActivityType::Activity,
+        ),
+        ("常规维护（预计 5 小时）", ActivityType::Maintenance),
+        ("PickUp: 星野(水手服)", ActivityType::PickUp),
+    ];
+    let pending: Vec<Activity> = specs
+        .iter()
+        .map(|(name, kind)| {
+            Activity::new(
+                name.to_string(),
+                ServerLocale::CN,
+                day,
+                day + 86_400_000 * 5,
+                *kind,
+            )
+        })
+        .collect();
+    let pair = (Vec::new(), pending);
+    let path = crate::image::activity::render(&pair, ServerLocale::CN).expect("压测渲染失败");
+    println!("stress image: {}", path.display());
+    let img = image::open(&path).expect("读取压测图失败").to_rgba8();
+    // 5 个活动 → 基础 3 格 + 2 格，格子约 364 高，总高必然过千
+    assert!(img.height() > 950, "格子没随活动数加高：{}", img.height());
+}
+
 #[ignore = "渲染冒烟自检(需系统中文字体), 运行: cargo test render -- --ignored"]
 #[test]
 fn render_probe() {
@@ -78,41 +124,26 @@ fn render_probe() {
     let preview = save_preview(&path, 900);
     println!("activity preview: {}", preview.display());
     let img = image::open(&path).expect("读取活动图失败").to_rgba8();
-    // 背景为白色
+    // 背景换成天蓝渐变了（对齐 bili 推送卡的 #d3edfa）：顶边应明显偏蓝
+    let top = img.get_pixel(img.width() / 2, 2);
     assert!(
-        count_color(&img, 255, 255, 255, 0) > 40_000,
-        "活动图背景应为白色"
+        top[2] as i32 > top[0] as i32 + 20,
+        "背景不是天蓝渐变：{top:?}"
     );
-    // 分组色块: 蓝(决战 level3) / 紫(普通活动 level2) / 橙(掉落 level1)
+    // 日期格子是白底
     assert!(
-        count_color(&img, 16, 126, 247, 12) > 1_000,
-        "缺少蓝色决战色块"
+        count_color(&img, 255, 255, 255, 6) > 40_000,
+        "缺少白色日期格子"
     );
+    // 粉色：今天的高亮边框 + 左栏生日卡
     assert!(
-        count_color(&img, 138, 43, 226, 12) > 1_000,
-        "缺少紫色普通活动色块"
+        count_color(&img, 255, 122, 168, 14) > 1_000,
+        "缺少粉色（今天/生日）"
     );
-    assert!(
-        count_color(&img, 255, 140, 0, 12) > 1_000,
-        "缺少橙色掉落色块"
-    );
-    // 生日有自己的一档颜色（粉），不再和活动共用绿色
-    assert!(
-        count_color(&img, 255, 122, 168, 12) > 1_000,
-        "缺少粉色生日色块"
-    );
-    // 生日必须排在活动**上面**：这一条是这次改动的主诉求
-    let birthday_top = top_y_of(&img, 255, 122, 168, 12).expect("没找到生日色块");
-    let battle_top = top_y_of(&img, 16, 126, 247, 12).expect("没找到决战色块");
-    assert!(
-        birthday_top < battle_top,
-        "生日没置顶：生日 y={birthday_top}，决战 y={battle_top}"
-    );
-    // 红(维护)在即将开始分组
-    assert!(
-        count_color(&img, 245, 108, 108, 12) > 1_000,
-        "缺少红色维护色块"
-    );
+    // 活动色条：决战是蓝、掉落是橙
+    // 蓝色只有一条色条（6x22）+ 端点是抗锯齿的，阈值取小一点
+    assert!(count_color(&img, 16, 126, 247, 12) > 80, "缺少蓝色活动标记");
+    assert!(count_color(&img, 255, 140, 0, 12) > 200, "缺少橙色活动标记");
     // 深色标题文字存在
     assert!(count_color(&img, 40, 44, 52, 20) > 200, "缺少标题文字");
 }

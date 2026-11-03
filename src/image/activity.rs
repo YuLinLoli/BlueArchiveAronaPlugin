@@ -1,29 +1,59 @@
-//! 活动日历图渲染（对应原版 util/ActivityUtil.createActivityImage + ImageUtil）
-//! 白底排版：标题 + 日期、正在进行/即将开始 两个分组；每个活动一行圆角色块，
-//! 底色按 activity_type.level 映射（橙/紫/蓝/红/绿 五档），白字左对齐，
-//! 右侧显示“今天/明天/后天 X点 开始/结束”的易读时间，底部标注数据来源。
+//! 活动日历图（网格版）：上部 7 天日期网格，下部两栏详情。
+//!
+//! 版面参考原神那种「日期条 + 事件」的日历：
+//! - 顶部 7 个日期格子，今天粉色高亮，有生日的日子点一个粉点；
+//! - 格子里挂**当天开始**的活动（进行中的不重复挂，否则每天都一堵色条墙），
+//!   每条最多两行，标签底色取该活动类型色的浅版；
+//! - 格子基础高度按 3 个活动预留，超过 3 个就按超出个数往上加（多几个加几格）；
+//! - 下面左栏「学生生日」、右栏「进行中 / 即将开始」，
+//!   时间写成「开始 —— 结束」，开始粉、结束红。
+//!
+//! 背景是竖直渐变的天蓝（对齐 bili 推送卡的默认底色 `#d3edfa`），不再是纯白。
 //! 字体不可用时渲染返回 Err，由命令层回退为文本日历。
-//! 产物为固定文件名 activity-<服务>.png, 属于「本地资源图片」: 由每日 0 点与活动到期后
-//! 5 分钟的定时任务刷新(见 commands::activity), /活动 命中本地图片时直接发送。
+//! 产物仍是 `activity-<服务>.png`，每日 8 点推送与 `/活动` 共用这一份。
 
 use crate::data::activity::type_level;
 use crate::entity::{Activity, ActivityType, ServerLocale};
 use crate::image::draw;
 use crate::image::text;
-use crate::util::time::translate_readable_time;
+use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use image::RgbaImage;
 use std::path::PathBuf;
 
-const TITLE_SIZE: f32 = 46.0;
-const DATE_SIZE: f32 = 26.0;
-const SECTION_SIZE: f32 = 34.0;
-const CONTENT_SIZE: f32 = 30.0;
-const TIME_SIZE: f32 = 23.0;
-const FOOTER_SIZE: f32 = 22.0;
-const PAD_X: i32 = 30;
-const PAD_Y: i32 = 34;
-const MIN_WIDTH: i32 = 620;
-const MAX_WIDTH: i32 = 1800;
+// ---------- 版面 ----------
+const W: i32 = 1400;
+const PAD: i32 = 44;
+const DAYS: usize = 7;
+/// 每个日期格子基础能放几个活动（超出的按个数加高）
+const BASE_SLOTS: usize = 3;
+/// 一个格子最多摆几个，多出来的折成 `+N`
+const MAX_ITEMS: usize = 8;
+/// 一个活动预留的高度（两行 + 间距）
+const SLOT_H: i32 = 52;
+/// 标签一行的高度
+const TAG_LINE: i32 = 21;
+
+const S_TITLE: f32 = 40.0;
+const S_SUB: f32 = 21.0;
+const S_DAY: f32 = 28.0;
+const S_WEEK: f32 = 17.0;
+const S_SEC: f32 = 26.0;
+const S_ROW: f32 = 22.0;
+const S_SMALL: f32 = 18.0;
+const S_TIME: f32 = 20.0;
+const S_TAG: f32 = 15.0;
+
+const TITLE_TOP: i32 = 40;
+const GRID_TOP: i32 = 158;
+
+const INK: draw::Color = [40, 44, 52, 255];
+const SUB: draw::Color = [122, 126, 134, 255];
+const PINK: draw::Color = [255, 122, 168, 255];
+const RED: draw::Color = [226, 74, 74, 255];
+const WHITE: draw::Color = [255, 255, 255, 255];
+/// 背景渐变两端（对齐 bili 推送卡的 `#d3edfa`）
+const BG_TOP: draw::Color = [198, 229, 248, 255];
+const BG_BOTTOM: draw::Color = [243, 251, 255, 255];
 
 /// 渲染某服务器活动日历并保存 PNG（在阻塞线程池里跑，避免占住 tokio 工作线程）
 pub async fn render_async(
@@ -43,71 +73,269 @@ pub fn render(
         return Err("未找到可用中文字体, 无法生成活动图片".to_string());
     };
     let (active, pending) = pair;
-    let mut active = active.clone();
-    let mut pending = pending.clone();
-    active.sort_by_key(|a| a.end_time);
-    pending.sort_by_key(|a| a.start_time);
 
-    // 生日单独摘出来置顶。它们的类型本来就是独立的 `Birthday`，但一直混在「即将开始」
-    // 里，被一堆普通活动埋掉——用户要的是「生日在最上面、活动在下面」。
-    // 两批都收：窗口是未来一周，生日只会落在 pending 里，但真跨到 active 也不能漏。
-    let (mut birthdays, active): (Vec<Activity>, Vec<Activity>) = active
-        .into_iter()
-        .partition(|activity| activity.activity_type == ActivityType::Birthday);
-    let (pending_birthdays, pending): (Vec<Activity>, Vec<Activity>) = pending
-        .into_iter()
-        .partition(|activity| activity.activity_type == ActivityType::Birthday);
-    birthdays.extend(pending_birthdays);
+    // ---------- 数据：生日摘出来、活动按「开始那天」落格 ----------
+    let mut birthdays: Vec<&Activity> = Vec::new();
+    let mut acts: Vec<&Activity> = Vec::new();
+    for activity in active.iter().chain(pending.iter()) {
+        if activity.activity_type == ActivityType::Birthday {
+            birthdays.push(activity);
+        } else {
+            acts.push(activity);
+        }
+    }
     birthdays.sort_by_key(|activity| activity.start_time);
 
-    // 没生日就整节不画：硬摆一行「学生生日 / 无」比不画更难看
-    let birthday_rows = collect_birthday_rows(&birthdays);
-    let active_rows = collect_rows(&active, false);
-    let pending_rows = collect_rows(&pending, true);
+    let today = Local::now().date_naive();
+    let days: Vec<NaiveDate> = (0..DAYS)
+        .map(|offset| today + Duration::days(offset as i64))
+        .collect();
+    let window_end = local_millis(days[DAYS - 1] + Duration::days(1));
+    let now_ms = Local::now().timestamp_millis();
 
-    let title = format!("{}活动日历", server.server_name());
-    let date = chrono::Local::now().format("%Y/%m/%d").to_string();
-    let footer = "数据来源: https://ba.gamekee.com/";
-
-    // 画布宽度: 取标题与最宽“内容+时间”行的自然宽度, 限制在 MIN..MAX
-    let mut widest = text::measure(&fonts, &title, TITLE_SIZE) as i32;
-    widest = widest.max(text::measure(&fonts, &date, DATE_SIZE) as i32);
-    for row in active_rows.iter().chain(pending_rows.iter()) {
-        widest = widest.max(row.content_width(&fonts));
+    let mut per_day: Vec<Vec<&Activity>> = vec![Vec::new(); DAYS];
+    for activity in &acts {
+        if activity.start_time < now_ms || activity.start_time >= window_end {
+            continue;
+        }
+        if let Some(day) = local_date(activity.start_time)
+            && let Some(index) = days.iter().position(|candidate| *candidate == day)
+        {
+            per_day[index].push(activity);
+        }
     }
-    widest = widest.max(text::measure(&fonts, footer, FOOTER_SIZE) as i32);
-    let width = (widest + PAD_X * 2).clamp(MIN_WIDTH, MAX_WIDTH);
-
-    // 画布高度 = 按绘制顺序累加各元素盒高
-    let mut height = PAD_Y;
-    height += line_box(&fonts, TITLE_SIZE);
-    height += line_box(&fonts, DATE_SIZE) + 10;
-    height += draw_sections_preview(&fonts, &birthday_rows, &active_rows, &pending_rows, width);
-    height += line_box(&fonts, FOOTER_SIZE) + PAD_Y;
-
-    let mut img = RgbaImage::new(width as u32, height.max(120) as u32);
-    draw::fill_rect(&mut img, 0, 0, width, height, draw::rgb(255, 255, 255));
-
-    let mut y = PAD_Y as f32;
-    // 标题（居中）
-    let title_h = line_box(&fonts, TITLE_SIZE);
-    draw_line_centered(&fonts, &mut img, &title, y, title_h, TITLE_SIZE, INK);
-    y += title_h as f32;
-    // 日期（右对齐）
-    let date_h = line_box(&fonts, DATE_SIZE);
-    draw_line_right(&fonts, &mut img, &date, width, y, date_h, DATE_SIZE, GRAY);
-    y += date_h as f32 + 10.0;
-    // 学生生日（置顶）：这一节是用户明确要的「生日在最上面」
-    if !birthday_rows.is_empty() {
-        y = draw_section_rows(&fonts, &mut img, y, width, "学生生日", &birthday_rows);
+    for bucket in &mut per_day {
+        bucket.sort_by_key(|activity| activity.start_time);
     }
-    // 正在进行
-    y = draw_section_rows(&fonts, &mut img, y, width, "正在进行", &active_rows);
-    // 即将开始
-    y = draw_section_rows(&fonts, &mut img, y, width, "即将开始", &pending_rows);
-    // 数据来源
-    let footer_h = line_box(&fonts, FOOTER_SIZE);
-    draw_line_left(&fonts, &mut img, footer, y, footer_h, FOOTER_SIZE, GRAY);
+
+    // 生日也按天归位（格子上那个粉点）
+    let mut birthday_days: Vec<bool> = vec![false; DAYS];
+    for activity in &birthdays {
+        if let Some(day) = local_date(activity.start_time)
+            && let Some(index) = days.iter().position(|candidate| *candidate == day)
+        {
+            birthday_days[index] = true;
+        }
+    }
+
+    let running: Vec<&Activity> = acts
+        .iter()
+        .copied()
+        .filter(|activity| activity.start_time <= now_ms && now_ms <= activity.end_time)
+        .collect();
+    let mut upcoming: Vec<&Activity> = acts
+        .iter()
+        .copied()
+        .filter(|activity| activity.start_time > now_ms && activity.start_time < window_end)
+        .collect();
+    let mut running = running;
+    running.sort_by_key(|activity| activity.end_time);
+    upcoming.sort_by_key(|activity| activity.start_time);
+
+    // ---------- 版面 ----------
+    let cell_w = (W - PAD * 2) / DAYS as i32;
+    // 基础高度按 3 个活动预留；超出多少个就加多少格
+    let busiest = per_day.iter().map(Vec::len).max().unwrap_or(0);
+    let shown = busiest.min(MAX_ITEMS);
+    let extra = shown.saturating_sub(BASE_SLOTS) as i32;
+    let cell_h = 92 + BASE_SLOTS as i32 * SLOT_H + extra * SLOT_H + 12;
+    let grid_top = GRID_TOP;
+    let body_top = grid_top + cell_h + 34;
+
+    let left_w = 392;
+    let right_x = PAD + left_w + 28;
+    let right_w = W - PAD - right_x;
+
+    let left_h = 42 + birthdays.len().max(1) as i32 * 40;
+    let right_h =
+        42 + running.len().max(1) as i32 * 46 + 22 + 42 + upcoming.len().max(1) as i32 * 46;
+    let body_h = left_h.max(right_h);
+    let height = body_top + body_h + 26 + 44;
+
+    let mut img = RgbaImage::from_pixel(W as u32, height as u32, image::Rgba(WHITE));
+    // 天蓝渐变打底：整幅铺一层，后面的白卡片再从上面盖
+    draw::fill_rect_vgrad(&mut img, 0, 0, W, height, BG_TOP, BG_BOTTOM);
+
+    // ---------- 标题 ----------
+    draw_text(
+        &fonts,
+        &mut img,
+        &format!("{}活动日历", server.server_name()),
+        PAD as f32,
+        TITLE_TOP as f32,
+        S_TITLE,
+        INK,
+    );
+    draw_text(
+        &fonts,
+        &mut img,
+        &format!("{} · 未来 {} 天", today.format("%Y/%m/%d"), DAYS),
+        PAD as f32,
+        (TITLE_TOP + 62) as f32,
+        S_SUB,
+        SUB,
+    );
+    draw_legend(&fonts, &mut img, W - PAD, TITLE_TOP + 12);
+
+    // ---------- 日期网格 ----------
+    for (index, day) in days.iter().enumerate() {
+        let x = PAD + index as i32 * cell_w;
+        let is_today = *day == today;
+        let weekend = day.weekday().num_days_from_monday() >= 5;
+        let (fill, outline, thickness) = if is_today {
+            (draw::rgb(255, 231, 241), PINK, 2)
+        } else if weekend {
+            (draw::rgb(247, 251, 255), draw::rgb(255, 255, 255), 1)
+        } else {
+            (WHITE, draw::rgb(255, 255, 255), 1)
+        };
+        draw::fill_rounded(&mut img, x, grid_top, cell_w - 6, cell_h, 12, fill);
+        draw::stroke_rounded(
+            &mut img,
+            x,
+            grid_top,
+            cell_w - 6,
+            cell_h,
+            12,
+            thickness,
+            outline,
+        );
+
+        // 日期与周几
+        let date_text = format!("{:02}", day.day());
+        let date_color = if is_today { PINK } else { INK };
+        let date_w = text::measure(&fonts, &date_text, S_DAY);
+        draw_text(
+            &fonts,
+            &mut img,
+            &date_text,
+            (x + cell_w - 6) as f32 / 2.0 + x as f32 - date_w / 2.0,
+            (grid_top + 12) as f32,
+            S_DAY,
+            date_color,
+        );
+        let weekday = "一二三四五六日"
+            .chars()
+            .nth(day.weekday().num_days_from_monday() as usize)
+            .unwrap_or('一');
+        let week = format!("周{weekday}");
+        let week_w = text::measure(&fonts, &week, S_WEEK);
+        draw_text(
+            &fonts,
+            &mut img,
+            &week,
+            (x + cell_w - 6) as f32 / 2.0 + x as f32 - week_w / 2.0,
+            (grid_top + 48) as f32,
+            S_WEEK,
+            SUB,
+        );
+
+        // 生日：左上角一个粉点
+        if birthday_days[index] {
+            draw::fill_rounded(&mut img, x + 12, grid_top + 72, 9, 9, 5, PINK);
+        }
+
+        // 当天开始的活动
+        let items = &per_day[index];
+        let mut y = grid_top + 88;
+        for activity in items.iter().take(MAX_ITEMS) {
+            y += draw_tag(&fonts, &mut img, x, y, cell_w - 6, activity);
+        }
+        if items.len() > MAX_ITEMS {
+            draw_text(
+                &fonts,
+                &mut img,
+                &format!("+{}", items.len() - MAX_ITEMS),
+                (x + 10) as f32,
+                (y + 2) as f32,
+                S_WEEK,
+                SUB,
+            );
+        }
+    }
+
+    // ---------- 左栏：学生生日 ----------
+    let mut ly = body_top;
+    draw_section_title(&fonts, &mut img, PAD as f32, ly as f32, "学生生日", PINK);
+    ly += 42;
+    if birthdays.is_empty() {
+        draw_text(
+            &fonts,
+            &mut img,
+            "未来一周没有学生生日",
+            PAD as f32,
+            ly as f32,
+            S_ROW,
+            SUB,
+        );
+    }
+    for activity in &birthdays {
+        draw::fill_rounded(
+            &mut img,
+            PAD,
+            ly - 4,
+            left_w,
+            38,
+            10,
+            draw::rgb(255, 236, 244),
+        );
+        let (month, day) = local_month_day(activity.start_time);
+        draw_text(
+            &fonts,
+            &mut img,
+            &format!("{month:02}/{day:02}"),
+            (PAD + 14) as f32,
+            (ly + 3) as f32,
+            S_ROW,
+            PINK,
+        );
+        draw_text(
+            &fonts,
+            &mut img,
+            strip_birthday_suffix(&activity.content),
+            (PAD + 88) as f32,
+            (ly + 3) as f32,
+            S_ROW,
+            INK,
+        );
+        ly += 40;
+    }
+
+    // ---------- 右栏：进行中 / 即将开始 ----------
+    let mut ry = body_top;
+    ry = draw_activity_section(
+        &fonts,
+        &mut img,
+        right_x,
+        ry,
+        right_w,
+        &format!("进行中 · {}", running.len()),
+        &running,
+    );
+    draw_activity_section(
+        &fonts,
+        &mut img,
+        right_x,
+        ry + 22,
+        right_w,
+        &format!("即将开始 · {}", upcoming.len()),
+        &upcoming,
+    );
+
+    // ---------- 页脚 ----------
+    let footer = format!(
+        "数据：GameKee 活动查询 + SchaleDB 学生生日 · 生成于 {}",
+        Local::now().format("%Y/%m/%d %H:%M")
+    );
+    draw_text(
+        &fonts,
+        &mut img,
+        &footer,
+        PAD as f32,
+        (body_top + body_h + 26) as f32,
+        S_SMALL,
+        SUB,
+    );
 
     let file = image_path(server);
     if let Some(parent) = file.parent() {
@@ -131,234 +359,227 @@ pub fn cached_image(server: ServerLocale) -> Option<PathBuf> {
     file.exists().then_some(file)
 }
 
-const INK: draw::Color = [40, 44, 52, 255];
-const GRAY: draw::Color = [120, 124, 132, 255];
-const WHITE: draw::Color = [255, 255, 255, 255];
+// ---------- 绘制辅助 ----------
 
-/// 单个活动展示行
-struct Row {
-    content: String,
-    time_text: String,
-    level: i32,
-    /// 指定底色（生日用它的粉）；`None` 时按 `level` 从活动色板取
-    color: Option<draw::Color>,
-}
-
-impl Row {
-    fn content_width(&self, fonts: &text::Fonts) -> i32 {
-        let content_w = text::measure(fonts, &self.content, CONTENT_SIZE) as i32;
-        let time_w = if self.time_text.is_empty() {
-            0
-        } else {
-            text::measure(fonts, &self.time_text, TIME_SIZE) as i32 + 30
-        };
-        content_w + time_w + PAD_X
-    }
-
-    fn box_height(&self, fonts: &text::Fonts) -> i32 {
-        let line = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
-        line + 16
-    }
-}
-
-fn collect_rows(activities: &[Activity], future: bool) -> Vec<Row> {
-    if activities.is_empty() {
-        return vec![Row {
-            content: "无".to_string(),
-            time_text: String::new(),
-            level: 1,
-            color: None,
-        }];
-    }
-    activities
-        .iter()
-        .map(|activity| {
-            let ts = if future {
-                activity.start_time
-            } else {
-                activity.end_time
-            };
-            Row {
-                content: activity.content.clone(),
-                time_text: translate_readable_time(ts, future),
-                level: type_level(activity.activity_type),
-                color: None,
-            }
-        })
-        .collect()
-}
-
-/// 生日的底色：和活动那五档（橙/紫/蓝/红/绿）分开，一眼能看出"这条不是活动"
-const BIRTHDAY_COLOR: draw::Color = [255, 122, 168, 255];
-
-/// 生日行：右侧写具体日期（11/05）而不是「明天」——生日问的是哪一天，
-/// 不是还剩几个小时，相对时间在这里反而要多想一步。
-///
-/// 名字去掉「的生日」后缀：这一节标题已经写着「学生生日」，每条再重复一遍就只是噪音。
-fn collect_birthday_rows(birthdays: &[Activity]) -> Vec<Row> {
-    use chrono::{Datelike, TimeZone};
-    birthdays
-        .iter()
-        .map(|activity| {
-            let date = chrono::Local
-                .timestamp_millis_opt(activity.start_time)
-                .single();
-            let time_text = date
-                .map(|date| format!("{:02}/{:02}", date.month(), date.day()))
-                .unwrap_or_default();
-            let content = activity
-                .content
-                .strip_suffix("的生日")
-                .unwrap_or(&activity.content)
-                .to_string();
-            Row {
-                content,
-                time_text,
-                level: type_level(activity.activity_type),
-                color: Some(BIRTHDAY_COLOR),
-            }
-        })
-        .collect()
-}
-
-/// 单行文本的盒高（行距 + 上下留白）
-fn line_box(fonts: &text::Fonts, size: f32) -> i32 {
-    let line = text::line_metrics(fonts, size)
-        .map(|(_, _, new_line)| new_line)
-        .unwrap_or(size * 1.3);
-    line.ceil() as i32
-}
-
-/// 预览高度: 各分组标题 + 所有行盒高之和
-fn draw_sections_preview(
-    fonts: &text::Fonts,
-    birthday_rows: &[Row],
-    active_rows: &[Row],
-    pending_rows: &[Row],
-    width: i32,
-) -> i32 {
-    let section_h = line_box(fonts, SECTION_SIZE) + 12;
-    let mut total = 0;
-    // 只有生日那一节可能为空（没生日就不画），活动两节空时 collect_rows 会给一行「无」，
-    // 标题照旧要留位置——这里按「rows 为空才跳过标题」处理，两种情况都对
-    for rows in [birthday_rows, active_rows, pending_rows] {
-        if rows.is_empty() {
-            continue;
-        }
-        total += section_h;
-        for row in rows {
-            let _ = width;
-            total += row.box_height(fonts) + 8;
-        }
-    }
-    total
-}
-
-/// 绘制一个分组（标题 + 色块行），返回下一元素起点 y
-fn draw_section_rows(
+/// 顶部对齐地画一行字（内部换算成基线）
+fn draw_text(
     fonts: &text::Fonts,
     img: &mut RgbaImage,
+    content: &str,
+    x: f32,
+    top: f32,
+    size: f32,
+    color: draw::Color,
+) {
+    let box_h = line_box(fonts, size);
+    draw_line_at(fonts, img, content, x, top, box_h, size, color);
+}
+
+fn line_box(fonts: &text::Fonts, size: f32) -> i32 {
+    text::line_metrics(fonts, size)
+        .map(|(_, _, new_line)| new_line)
+        .unwrap_or(size * 1.3)
+        .ceil() as i32
+}
+
+fn draw_line_at(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    content: &str,
+    x: f32,
+    top: f32,
+    box_h: i32,
+    size: f32,
+    color: draw::Color,
+) {
+    let ascent = text::line_metrics(fonts, size)
+        .map(|(a, _, _)| a)
+        .unwrap_or(size * 0.8);
+    let baseline = top + (box_h as f32 - (ascent + size * 0.25)) / 2.0 + ascent;
+    text::draw_line(fonts, img, content, x, baseline, size, color);
+}
+
+/// 分组标题：左边一条竖色条 + 深色字
+fn draw_section_title(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    x: f32,
     y: f32,
+    label: &str,
+    accent: draw::Color,
+) {
+    draw::fill_rounded(img, x as i32 - 13, y as i32 + 6, 6, 24, 3, accent);
+    draw_text(fonts, img, label, x, y, S_SEC, INK);
+}
+
+/// 右上角图例：生日 / 总力战 / 掉落 / 维护
+fn draw_legend(fonts: &text::Fonts, img: &mut RgbaImage, right: i32, top: i32) {
+    let entries: [(&str, draw::Color); 4] = [
+        ("生日", PINK),
+        ("总力战", draw::rgb(16, 126, 247)),
+        ("掉落", draw::rgb(255, 140, 0)),
+        ("维护", draw::rgb(245, 108, 108)),
+    ];
+    let mut x = right as f32;
+    for (label, color) in entries.iter().rev() {
+        let w = text::measure(fonts, label, S_SMALL);
+        x -= w;
+        draw_text(fonts, img, label, x, top as f32, S_SMALL, SUB);
+        x -= 14.0;
+        draw::fill_rounded(img, (x - 10.0) as i32, top + 6, 10, 10, 5, *color);
+        x -= 22.0;
+    }
+}
+
+/// 一个活动标签：类型浅色底 + 色点 + 最多两行文字，返回占用高度
+fn draw_tag(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    x: i32,
+    y: i32,
+    cell_w: i32,
+    activity: &Activity,
+) -> i32 {
+    let max_w = (cell_w - 44) as f32;
+    let lines = wrap2(fonts, &activity.content, S_TAG, max_w);
+    let block_h = lines.len() as i32 * TAG_LINE + 6;
+    let accent = level_color(type_level(activity.activity_type));
+    // 底用类型色的浅版：白底在渐变背景上分不出类型，一眼扫过去全是白块
+    let tint = draw::lerp(accent, WHITE, 0.78);
+    draw::fill_rounded(img, x + 7, y, cell_w - 19, block_h, 6, tint);
+    draw::fill_rounded(img, x + 11, y + 6, 6, 8, 2, accent);
+    for (index, line) in lines.iter().enumerate() {
+        draw_text(
+            fonts,
+            img,
+            line,
+            (x + 21) as f32,
+            (y + 3 + index as i32 * TAG_LINE) as f32,
+            S_TAG,
+            INK,
+        );
+    }
+    block_h + 4
+}
+
+/// 右栏一节：标题 + 若干活动行（色条 / 名称 / 开始粉—结束红），返回下一个 y
+fn draw_activity_section(
+    fonts: &text::Fonts,
+    img: &mut RgbaImage,
+    x: i32,
+    y: i32,
     width: i32,
     label: &str,
-    rows: &[Row],
-) -> f32 {
-    let mut cursor = y;
-    // 分组标题: 左侧色条 + 深色文字
-    let section_h = line_box(fonts, SECTION_SIZE);
-    draw::fill_rect(
-        img,
-        PAD_X - 6,
-        cursor as i32 + 4,
-        8,
-        section_h - 8,
-        draw::rgb(90, 150, 255),
-    );
-    draw_line_left(fonts, img, label, cursor, section_h, SECTION_SIZE, INK);
-    cursor += section_h as f32 + 12.0;
-    for row in rows {
-        let block_h = row.box_height(fonts);
-        draw_activity_block(fonts, img, row, width, cursor, block_h);
-        cursor += block_h as f32 + 8.0;
-    }
-    cursor
-}
-
-fn draw_activity_block(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    row: &Row,
-    width: i32,
-    y: f32,
-    block_h: i32,
-) {
-    if row.content == "无" {
-        let line_h = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
-        let top = y + (block_h as f32 - line_h as f32) / 2.0;
-        draw_line_left_at(
-            fonts,
-            img,
-            "无",
-            PAD_X as f32,
-            top,
-            line_h as f32,
-            CONTENT_SIZE,
-            GRAY,
-        );
-        return;
-    }
-    // 内容超出可用宽度时从尾部裁剪并加省略号（保留右侧时间）
-    let mut content = row.content.clone();
-    let time_w = if row.time_text.is_empty() {
-        0
-    } else {
-        text::measure(fonts, &row.time_text, TIME_SIZE) as i32 + 34
-    };
-    let available = width - PAD_X * 2 - time_w;
-    if text::measure(fonts, &content, CONTENT_SIZE) as i32 > available {
-        while !content.is_empty() && text::measure(fonts, &content, CONTENT_SIZE) as i32 > available
-        {
-            content.pop();
-        }
-        content.push('…');
-    }
-    // 整行圆角色块
-    draw::fill_rounded(
-        img,
-        PAD_X - 10,
-        y as i32,
-        width - (PAD_X - 10) * 2,
-        block_h,
-        22,
-        row.color.unwrap_or_else(|| level_color(row.level)),
-    );
-    let box_top = y
-        + (block_h as f32 - line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE)) as f32)
-            / 2.0;
-    let line_h = line_box(fonts, CONTENT_SIZE).max(line_box(fonts, TIME_SIZE));
-    draw_line_left_at(
+    rows: &[&Activity],
+) -> i32 {
+    draw_section_title(
         fonts,
         img,
-        &content,
-        PAD_X as f32,
-        box_top,
-        line_h as f32,
-        CONTENT_SIZE,
-        WHITE,
+        x as f32,
+        y as f32,
+        label,
+        draw::rgb(61, 139, 253),
     );
-    if !row.time_text.is_empty() {
-        let time_w = text::measure(fonts, &row.time_text, TIME_SIZE);
-        draw_line_at(
+    let mut cursor = y + 42;
+    if rows.is_empty() {
+        draw_text(fonts, img, "暂无", x as f32, cursor as f32, S_ROW, SUB);
+        return cursor + 44;
+    }
+    for activity in rows {
+        draw::fill_rounded(img, x, cursor - 4, width, 42, 10, WHITE);
+        draw::fill_rounded(
+            img,
+            x + 12,
+            cursor + 6,
+            6,
+            22,
+            3,
+            level_color(type_level(activity.activity_type)),
+        );
+        // 时间：开始粉 — 结束红，右对齐
+        let begin = month_day(activity.start_time);
+        let end = month_day(activity.end_time);
+        let w_b = text::measure(fonts, &begin, S_TIME);
+        let w_s = text::measure(fonts, "—", S_TIME);
+        let w_e = text::measure(fonts, &end, S_TIME);
+        let total = w_b + w_s + w_e + 12.0;
+        let rx = (x + width) as f32 - total - 16.0;
+        draw_text(fonts, img, &begin, rx, (cursor + 7) as f32, S_TIME, PINK);
+        draw_text(
             fonts,
             img,
-            &row.time_text,
-            width as f32 - PAD_X as f32 - time_w,
-            box_top,
-            line_h as f32,
-            TIME_SIZE,
-            WHITE,
+            "—",
+            rx + w_b + 6.0,
+            (cursor + 7) as f32,
+            S_TIME,
+            SUB,
         );
+        draw_text(
+            fonts,
+            img,
+            &end,
+            rx + w_b + 6.0 + w_s + 6.0,
+            (cursor + 7) as f32,
+            S_TIME,
+            RED,
+        );
+        // 标题：超宽就截断（时间那一列先占位）
+        let title_w = (x + width) as f32 - total - 16.0 - (x + 30) as f32 - 12.0;
+        draw_text(
+            fonts,
+            img,
+            &fit_text(fonts, &activity.content, S_ROW, title_w),
+            (x + 30) as f32,
+            (cursor + 4) as f32,
+            S_ROW,
+            INK,
+        );
+        cursor += 46;
     }
+    cursor + 10
+}
+
+/// 最多两行折行；第二行还放不下就截断加省略号
+fn wrap2(fonts: &text::Fonts, content: &str, size: f32, max_w: f32) -> Vec<String> {
+    if text::measure(fonts, content, size) <= max_w {
+        return vec![content.to_string()];
+    }
+    let mut first = String::new();
+    let mut offset = 0usize;
+    for (index, ch) in content.char_indices() {
+        let mut candidate = first.clone();
+        candidate.push(ch);
+        if text::measure(fonts, &candidate, size) > max_w && !first.is_empty() {
+            offset = index;
+            break;
+        }
+        first.push(ch);
+        offset = index + ch.len_utf8();
+    }
+    let rest = &content[offset..];
+    if text::measure(fonts, rest, size) <= max_w {
+        return vec![first, rest.to_string()];
+    }
+    vec![first, fit_text(fonts, rest, size, max_w)]
+}
+
+/// 单行截断：放不下就砍到刚好再加省略号
+fn fit_text(fonts: &text::Fonts, content: &str, size: f32, max_w: f32) -> String {
+    if text::measure(fonts, content, size) <= max_w {
+        return content.to_string();
+    }
+    let mut out = String::new();
+    for ch in content.chars() {
+        let mut candidate = out.clone();
+        candidate.push(ch);
+        candidate.push('…');
+        if text::measure(fonts, &candidate, size) > max_w && !out.is_empty() {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 /// level -> 色块颜色（对应 ActivityColorMap: 1橙 2紫 3蓝 4红 5绿）
@@ -372,94 +593,70 @@ fn level_color(level: i32) -> draw::Color {
     }
 }
 
-// ---- 文字排版（top 为文本盒顶, 盒内按行高垂直居中） ----
-
-fn draw_line_left(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    s: &str,
-    top: f32,
-    box_h: i32,
-    size: f32,
-    color: draw::Color,
-) {
-    draw_line_left_at(fonts, img, s, PAD_X as f32, top, box_h as f32, size, color);
+/// 「X的生日」→「X」：这一节的标题已经写着生日，每条再重复一遍只是噪音
+fn strip_birthday_suffix(content: &str) -> &str {
+    content.strip_suffix("的生日").unwrap_or(content)
 }
 
-// 绘图入参就是目标区域几何 + 字号 + 颜色，加上这一轮的字面天然超 7 个
-#[allow(clippy::too_many_arguments)]
-fn draw_line_left_at(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    s: &str,
-    x: f32,
-    top: f32,
-    box_h: f32,
-    size: f32,
-    color: draw::Color,
-) {
-    draw_line_at(fonts, img, s, x, top, box_h, size, color);
+fn local_date(ms: i64) -> Option<NaiveDate> {
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| dt.date_naive())
 }
 
-// 同上：区域几何 + 字号 + 颜色，再加这一轮的字面
-#[allow(clippy::too_many_arguments)]
-fn draw_line_right(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    s: &str,
-    width: i32,
-    top: f32,
-    box_h: i32,
-    size: f32,
-    color: draw::Color,
-) {
-    let text_w = text::measure(fonts, s, size);
-    draw_line_at(
-        fonts,
-        img,
-        s,
-        width as f32 - PAD_X as f32 - text_w,
-        top,
-        box_h as f32,
-        size,
-        color,
-    );
+fn local_month_day(ms: i64) -> (u32, u32) {
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|dt| (dt.month(), dt.day()))
+        .unwrap_or((0, 0))
 }
 
-fn draw_line_centered(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    s: &str,
-    top: f32,
-    box_h: i32,
-    size: f32,
-    color: draw::Color,
-) {
-    let text_w = text::measure(fonts, s, size);
-    draw_line_at(
-        fonts,
-        img,
-        s,
-        (img.width() as f32 - text_w) / 2.0,
-        top,
-        box_h as f32,
-        size,
-        color,
-    );
+fn month_day(ms: i64) -> String {
+    let (month, day) = local_month_day(ms);
+    format!("{month:02}/{day:02}")
 }
 
-// 同上：落点几何 + 字号 + 颜色，再加这一轮的字面
-#[allow(clippy::too_many_arguments)]
-fn draw_line_at(
-    fonts: &text::Fonts,
-    img: &mut RgbaImage,
-    s: &str,
-    x: f32,
-    top: f32,
-    box_h: f32,
-    size: f32,
-    color: draw::Color,
-) {
-    let baseline = top + box_h / 2.0 + size * 0.42;
-    text::draw_line(fonts, img, s, x, baseline, size, color);
+fn local_millis(day: NaiveDate) -> i64 {
+    let naive = day.and_hms_opt(0, 0, 0).unwrap_or_default();
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 折行最多两行，且第二行永远不超过给定宽度
+    #[test]
+    fn wrap_keeps_two_lines_at_most() {
+        let Some(fonts) = text::acquire() else {
+            return; // 本机没中文字体就跳过（渲染探针另有说明）
+        };
+        let lines = wrap2(&fonts, "【特别委托】道具掉落量3倍", S_TAG, 143.0);
+        assert!(lines.len() <= 2, "{lines:?}");
+        for line in &lines {
+            assert!(text::measure(&fonts, line, S_TAG) <= 143.0 + 1.0, "{line}");
+        }
+    }
+
+    /// 短名字不折行
+    #[test]
+    fn short_names_stay_on_one_line() {
+        let Some(fonts) = text::acquire() else {
+            return;
+        };
+        assert_eq!(wrap2(&fonts, "常规维护", S_TAG, 143.0).len(), 1);
+    }
+
+    /// 生日后缀只在渲染时去掉，数据本身不动
+    #[test]
+    fn birthday_suffix_is_only_a_display_concern() {
+        assert_eq!(strip_birthday_suffix("白子的生日"), "白子");
+        assert_eq!(strip_birthday_suffix("白子"), "白子");
+    }
 }
