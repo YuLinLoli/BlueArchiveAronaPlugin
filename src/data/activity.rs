@@ -130,6 +130,19 @@ fn insert(
         || content.contains("制約解除決戰")
         || content.contains("决战")
         || content.contains("決戰")
+        // 总力战 BOSS 的标题只有 BOSS 名 + 战场类型（「切赛德 · 野外战」），
+        // 不含「总力战」三个字；不认这几项就会被归成普通活动（紫），
+        // 跟掉落/维护那些混成一片
+        || content.contains("野外战")
+        || content.contains("野外戰")
+        || content.contains("室内战")
+        || content.contains("室內戰")
+        || content.contains("特殊装甲")
+        || content.contains("特殊裝甲")
+        || content.contains("重装甲")
+        || content.contains("重裝甲")
+        || content.contains("突破测试")
+        || content.contains("突破測試")
     {
         activity_type = ActivityType::DecisiveBattle;
     }

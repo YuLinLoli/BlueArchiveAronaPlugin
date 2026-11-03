@@ -163,7 +163,10 @@ pub async fn upcoming_birthday_activities(server: ServerLocale) -> Vec<Activity>
     birthday_activities_for(&list, server, chrono::Local::now().date_naive())
 }
 
-/// 纯函数版本(便于测试): 以 today 为基准取明天起 WINDOW_DAYS 天内的生日
+/// 纯函数版本(便于测试): 以 today 为基准取**今天起** WINDOW_DAYS 天内的生日
+///
+/// 窗口左端是 0 而不是 1：日历图要显示「今日的生日」，把今天排除掉会出现
+/// 「今天有学生过生日、但卡片上找不到」的怪事（用户实测过一次）。
 pub fn birthday_activities_for(
     list: &[Birthday],
     server: ServerLocale,
@@ -175,7 +178,7 @@ pub fn birthday_activities_for(
             continue;
         };
         let days = (date - today).num_days();
-        if !(1..WINDOW_DAYS).contains(&days) {
+        if !(0..WINDOW_DAYS).contains(&days) {
             continue;
         }
         let Some(naive) = date.and_hms_opt(0, 0, 0) else {
@@ -202,9 +205,11 @@ pub fn birthday_activities_for(
 /// 下一个生日日期：当年已过（或就是今天）则顺延到明年，正确处理跨年的一周窗口
 fn next_occurrence(today: chrono::NaiveDate, birthday: &Birthday) -> Option<chrono::NaiveDate> {
     use chrono::Datelike;
-    let mut date = chrono::NaiveDate::from_ymd_opt(today.year(), birthday.month, birthday.day)?;
-    if date <= today {
-        date = chrono::NaiveDate::from_ymd_opt(today.year() + 1, birthday.month, birthday.day)?;
+    let date = chrono::NaiveDate::from_ymd_opt(today.year(), birthday.month, birthday.day)?;
+    // 只有**过了**才顺延到明年：今天就是今天。原来的 `<= today` 会把当天的生日
+    // 直接推到 365 天后，日历上于是「今天有人过生日但找不到」
+    if date < today {
+        return chrono::NaiveDate::from_ymd_opt(today.year() + 1, birthday.month, birthday.day);
     }
     Some(date)
 }
@@ -245,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn window_covers_next_week_only() {
+    fn window_starts_today_and_covers_a_week() {
         let today = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap();
         let list = vec![
             Birthday {
@@ -282,8 +287,8 @@ mod tests {
         assert!(names.contains(&"明天的生日".to_string()));
         assert!(names.contains(&"第六天的生日".to_string()));
         assert!(
-            !names.contains(&"今天的生日".to_string()),
-            "当天生日不入列表"
+            names.contains(&"今天的生日".to_string()),
+            "当天生日必须入列表——日历要显示「今日的生日」"
         );
         assert!(
             !names.contains(&"第七天的生日".to_string()),

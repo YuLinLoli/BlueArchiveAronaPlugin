@@ -248,3 +248,15 @@ async fn refresh_all_images_creates_local_files() {
     }
     assert_eq!(produced, 3, "应生成 日服/国际服/国服 三张本地活动图片");
 }
+
+#[ignore = "联网自检：拉真实活动与生日出图, 运行: cargo test render_live -- --ignored --nocapture"]
+#[test]
+fn render_live_probe() {
+    let runtime = tokio::runtime::Runtime::new().expect("建运行时失败");
+    let pair = runtime
+        .block_on(crate::data::activity::fetch(ServerLocale::CN))
+        .expect("拉取国服活动失败");
+    println!("active {} / pending {}", pair.0.len(), pair.1.len());
+    let path = crate::image::activity::render(&pair, ServerLocale::CN).expect("渲染失败");
+    println!("live image: {}", path.display());
+}
