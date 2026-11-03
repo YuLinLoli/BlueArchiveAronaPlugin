@@ -40,6 +40,8 @@ const S_WEEK: f32 = 17.0;
 const S_SEC: f32 = 26.0;
 const S_ROW: f32 = 22.0;
 const S_SMALL: f32 = 18.0;
+/// 图例字号：用户要求在 18 的基础上再大一倍；色点与间距按比例跟着走（见 [`draw_legend`]）
+const S_LEGEND: f32 = 36.0;
 const S_TIME: f32 = 20.0;
 const S_TAG: f32 = 15.0;
 
@@ -453,7 +455,10 @@ fn draw_section_title(
     draw_text(fonts, img, label, x, y, S_SEC, INK);
 }
 
-/// 右上角图例：生日 / 总力战 / 掉落 / 维护
+/// 右上角图例：生日 / 总力战 / 掉落 / 维护。
+///
+/// 字号 [`S_LEGEND`]，色点与间距按字号比例缩放——写死的话字号翻倍后
+/// 10px 的小点挂在大字旁边会像标点符号。
 fn draw_legend(fonts: &text::Fonts, img: &mut RgbaImage, right: i32, top: i32) {
     let entries: [(&str, draw::Color); 4] = [
         ("生日", PINK),
@@ -461,14 +466,24 @@ fn draw_legend(fonts: &text::Fonts, img: &mut RgbaImage, right: i32, top: i32) {
         ("掉落", draw::rgb(255, 140, 0)),
         ("维护", draw::rgb(245, 108, 108)),
     ];
+    let dot = S_LEGEND * 0.55; // 色点直径随字号
+    let dot_top = (S_LEGEND - dot) * 0.42; // 对着字面重心，不顶到行框上沿
     let mut x = right as f32;
     for (label, color) in entries.iter().rev() {
-        let w = text::measure(fonts, label, S_SMALL);
+        let w = text::measure(fonts, label, S_LEGEND);
         x -= w;
-        draw_text(fonts, img, label, x, top as f32, S_SMALL, SUB);
-        x -= 14.0;
-        draw::fill_rounded(img, (x - 10.0) as i32, top + 6, 10, 10, 5, *color);
-        x -= 22.0;
+        draw_text(fonts, img, label, x, top as f32, S_LEGEND, SUB);
+        x -= S_LEGEND * 0.45;
+        draw::fill_rounded(
+            img,
+            (x - dot) as i32,
+            (top as f32 + dot_top) as i32,
+            dot as i32,
+            dot as i32,
+            (dot * 0.5) as i32,
+            *color,
+        );
+        x -= dot + S_LEGEND * 0.45;
     }
 }
 
