@@ -5,7 +5,7 @@
 群里能回应什么完全由装了哪些插件决定 —— 这个仓库就是其中一揽子玩法。
 
 - 框架仓库：<https://github.com/YuLinLoli/Arona-rs>（插件接口说明见其 `PLUGIN_DEVELOPMENT.md`）
-- 上游原版：<https://github.com/diyigemt/arona>（Kotlin + Mirai 插件，玩法与数据来源）
+- 上游原版：<https://github.com/diyigemt/arona>（Kotlin + Mirai 插件，玩法与数据来源；上游版权 Copyright (C) 2020-2021 StageGuard / diyigemt，本插件的移植部分随 AGPL-3.0 授权并向其回赠）
 - 开源协议：GNU AGPL-3.0-only（见 `LICENSE`，中文译本 `LICENSE.zh-CN.md`）
 
 ## 命令一览
